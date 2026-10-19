@@ -413,6 +413,7 @@ static void draw_text(canvas_t *cv, const char *str, int x, int y, int scale, in
 }
 
 static void draw_os_badge(canvas_t *cv, const char *os_type, float cx, float cy, float radius) {
+    float sf = radius / 88.0f;
     color_t ring = parse_hex("#38BDF8", 235);
     color_t none = {0, 0, 0, 0};
 
@@ -426,33 +427,34 @@ static void draw_os_badge(canvas_t *cv, const char *os_type, float cx, float cy,
 
     color_t fill = ring;
     fill.a = 38;
-    draw_sdf_circle(cv, cx, cy, radius, fill, ring, 4.0f);
+    float rw = 4.0f * sf; if (rw < 1.5f) rw = 1.5f;
+    draw_sdf_circle(cv, cx, cy, radius, fill, ring, rw);
 
     if (strcmp(os_type, "windows") == 0) {
         /* 4-pane Windows 11 vector grid */
         float s = radius * 0.42f;
-        float g = 6.0f;
-        draw_sdf_rounded_rect(cv, cx - s - g/2, cy - s - g/2, s, s, 6.0f, ring, none, 0);
-        draw_sdf_rounded_rect(cv, cx + g/2,     cy - s - g/2, s, s, 6.0f, ring, none, 0);
-        draw_sdf_rounded_rect(cv, cx - s - g/2, cy + g/2,     s, s, 6.0f, ring, none, 0);
-        draw_sdf_rounded_rect(cv, cx + g/2,     cy + g/2,     s, s, 6.0f, ring, none, 0);
+        float g = 6.0f * sf;
+        draw_sdf_rounded_rect(cv, cx - s - g/2, cy - s - g/2, s, s, 6.0f * sf, ring, none, 0);
+        draw_sdf_rounded_rect(cv, cx + g/2,     cy - s - g/2, s, s, 6.0f * sf, ring, none, 0);
+        draw_sdf_rounded_rect(cv, cx - s - g/2, cy + g/2,     s, s, 6.0f * sf, ring, none, 0);
+        draw_sdf_rounded_rect(cv, cx + g/2,     cy + g/2,     s, s, 6.0f * sf, ring, none, 0);
     } else if (strcmp(os_type, "omarchy") == 0 || strcmp(os_type, "fedora") == 0 || strcmp(os_type, "arch") == 0) {
         /* Terminal / Hyprland tiling window vector icon */
         float w = radius * 0.92f, h = radius * 0.72f;
-        draw_sdf_rounded_rect(cv, cx - w/2, cy - h/2, w * 0.54f, h, 8.0f, ring, none, 0);
-        draw_sdf_rounded_rect(cv, cx + w * 0.08f, cy - h/2, w * 0.42f, h * 0.46f, 6.0f, ring, none, 0);
-        draw_sdf_rounded_rect(cv, cx + w * 0.08f, cy + h * 0.04f, w * 0.42f, h * 0.46f, 6.0f, ring, none, 0);
+        draw_sdf_rounded_rect(cv, cx - w/2, cy - h/2, w * 0.54f, h, 8.0f * sf, ring, none, 0);
+        draw_sdf_rounded_rect(cv, cx + w * 0.08f, cy - h/2, w * 0.42f, h * 0.46f, 6.0f * sf, ring, none, 0);
+        draw_sdf_rounded_rect(cv, cx + w * 0.08f, cy + h * 0.04f, w * 0.42f, h * 0.46f, 6.0f * sf, ring, none, 0);
     } else if (strcmp(os_type, "android") == 0) {
-        /* Android controller / chip badge */
-        draw_text(cv, "A17", (int)cx, (int)cy - 16, 4, 1, ring);
+        int ts = (int)roundf(4.0f * sf); if (ts < 2) ts = 2;
+        draw_text(cv, "A17", (int)cx, (int)(cy - 4 * ts), ts, 1, ring);
     } else if (strcmp(os_type, "usb") == 0) {
-        /* USB drive silhouette */
         float uw = radius * 0.52f, uh = radius * 0.74f;
-        draw_sdf_rounded_rect(cv, cx - uw/2, cy - uh * 0.25f, uw, uh * 0.75f, 8.0f, ring, none, 0);
+        draw_sdf_rounded_rect(cv, cx - uw/2, cy - uh * 0.25f, uw, uh * 0.75f, 8.0f * sf, ring, none, 0);
         color_t plug = ring; plug.a = 160;
-        draw_sdf_rounded_rect(cv, cx - uw * 0.34f, cy - uh * 0.62f, uw * 0.68f, uh * 0.36f, 4.0f, plug, ring, 2.0f);
+        draw_sdf_rounded_rect(cv, cx - uw * 0.34f, cy - uh * 0.62f, uw * 0.68f, uh * 0.36f, 4.0f * sf, plug, ring, 2.0f * sf);
     } else {
-        draw_text(cv, "OS", (int)cx, (int)cy - 16, 4, 1, ring);
+        int ts = (int)roundf(4.0f * sf); if (ts < 2) ts = 2;
+        draw_text(cv, "OS", (int)cx, (int)(cy - 4 * ts), ts, 1, ring);
     }
 }
 
@@ -462,11 +464,23 @@ static void render_ui(canvas_t *cv, const theme_config_t *t,
                       bool luks_modal, const char *luks_pass, const char *status_msg) {
     int w = cv->width;
     int h = cv->height;
+    float sf = (float)w / 2880.0f;
+    if (sf < 0.32f) sf = 0.32f;
 
-    int total_w = count * t->card_width + (count - 1) * t->card_gap;
+    int cw_i   = (int)(t->card_width * sf);
+    int ch_i   = (int)(t->card_height * sf);
+    int cgap_i = (int)(t->card_gap * sf);
+    float crad = t->card_radius * sf;
+
+    int s_title = (int)roundf(5.0f * sf); if (s_title < 2) s_title = 2;
+    int s_card  = (int)roundf(3.0f * sf); if (s_card < 1)  s_card  = 1;
+    int s_sub   = (int)roundf(2.0f * sf); if (s_sub < 1)   s_sub   = 1;
+
+    int total_w = count * cw_i + (count - 1) * cgap_i;
     int start_x = (w - total_w) / 2;
-    float sel_cx = start_x + selected * (t->card_width + t->card_gap) + t->card_width * 0.5f;
+    float sel_cx = start_x + selected * (cw_i + cgap_i) + cw_i * 0.5f;
     float sel_cy = h * 0.50f;
+    float glow_r = 420.0f * sf;
 
     /* 1. Smooth linear background gradient + radial glow behind selected card */
     for (int y = 0; y < h; y++) {
@@ -479,7 +493,7 @@ static void render_ui(canvas_t *cv, const theme_config_t *t,
         for (int x = 0; x < w; x++) {
             float dx = x - sel_cx;
             float dist2 = dx * dx + dy * dy;
-            float glow = expf(-dist2 / (2.0f * 420.0f * 420.0f)) * 0.22f;
+            float glow = expf(-dist2 / (2.0f * glow_r * glow_r)) * 0.22f;
             int r = (int)(br + t->accent.r * glow);
             int g = (int)(bg + t->accent.g * glow);
             int b = (int)(bb + t->accent.b * glow);
@@ -491,67 +505,69 @@ static void render_ui(canvas_t *cv, const theme_config_t *t,
     }
 
     /* 2. Header Title & Subtitle */
-    draw_text(cv, t->title, w / 2, (int)(h * 0.11f), 5, 1, t->text);
-    draw_text(cv, t->subtitle, w / 2, (int)(h * 0.165f), 2, 1, t->subtext);
+    draw_text(cv, t->title, w / 2, (int)(h * 0.11f), s_title, 1, t->text);
+    draw_text(cv, t->subtitle, w / 2, (int)(h * 0.165f), s_sub, 1, t->subtext);
 
     /* 3. OS Boot Cards */
-    int card_y = (h - t->card_height) / 2 + 24;
+    int card_y = (h - ch_i) / 2 + (int)(24 * sf);
     for (int i = 0; i < count; i++) {
         bool is_sel = (i == selected);
-        float x = (float)(start_x + i * (t->card_width + t->card_gap));
-        float y = (float)(is_sel ? (card_y - 22) : card_y);
-        float cw = (float)t->card_width;
-        float ch = (float)t->card_height;
+        float x = (float)(start_x + i * (cw_i + cgap_i));
+        float y = (float)(is_sel ? (card_y - (int)(22 * sf)) : card_y);
+        float cw = (float)cw_i;
+        float ch = (float)ch_i;
 
         color_t border = is_sel ? t->accent : (color_t){255, 255, 255, 32};
-        float bw = is_sel ? 4.5f : 2.0f;
-        draw_sdf_rounded_rect(cv, x, y, cw, ch, (float)t->card_radius,
+        float bw = is_sel ? (4.5f * sf) : (2.0f * sf);
+        if (bw < 1.5f) bw = 1.5f;
+        draw_sdf_rounded_rect(cv, x, y, cw, ch, crad,
                               is_sel ? t->card_sel_bg : t->card_bg, border, bw);
 
         /* Index badge [1..N] */
         char idx_s[16];
         snprintf(idx_s, sizeof(idx_s), "[%d]", i + 1);
-        draw_text(cv, idx_s, (int)(x + 34), (int)(y + 34), 2, 0,
+        draw_text(cv, idx_s, (int)(x + 34 * sf), (int)(y + 34 * sf), s_sub, 0,
                   is_sel ? t->accent : t->subtext);
 
         if (entries[i].needs_luks) {
-            draw_text(cv, "LUKS2", (int)(x + cw - 34), (int)(y + 34), 2, 2, t->accent);
+            draw_text(cv, "LUKS2", (int)(x + cw - 34 * sf), (int)(y + 34 * sf), s_sub, 2, t->accent);
         }
 
         /* Vector OS Badge */
-        draw_os_badge(cv, entries[i].os_type, x + cw * 0.5f, y + ch * 0.35f, 88.0f);
+        draw_os_badge(cv, entries[i].os_type, x + cw * 0.5f, y + ch * 0.35f, 88.0f * sf);
 
         /* Title & Subtitle */
-        draw_text(cv, entries[i].title, (int)(x + cw * 0.5f), (int)(y + ch * 0.63f), 3, 1, t->text);
-        draw_text(cv, entries[i].subtitle, (int)(x + cw * 0.5f), (int)(y + ch * 0.72f), 2, 1, t->subtext);
+        draw_text(cv, entries[i].title, (int)(x + cw * 0.5f), (int)(y + ch * 0.63f), s_card, 1, t->text);
+        draw_text(cv, entries[i].subtitle, (int)(x + cw * 0.5f), (int)(y + ch * 0.72f), s_sub, 1, t->subtext);
 
         if (is_sel) {
-            float pw = 280.0f, ph = 56.0f;
+            float pw = 280.0f * sf, ph = 56.0f * sf;
             float px = x + (cw - pw) * 0.5f;
-            float py = y + ch - 92.0f;
+            float py = y + ch - 92.0f * sf;
             color_t pill_fill = t->accent;
             pill_fill.a = 48;
-            draw_sdf_rounded_rect(cv, px, py, pw, ph, 28.0f, pill_fill, t->accent, 2.5f);
-            draw_text(cv, "ENTER TO BOOT", (int)(x + cw * 0.5f), (int)(py + 20.0f), 2, 1, t->text);
+            draw_sdf_rounded_rect(cv, px, py, pw, ph, 28.0f * sf, pill_fill, t->accent, 2.5f * sf);
+            draw_text(cv, "ENTER TO BOOT", (int)(x + cw * 0.5f), (int)(py + 20.0f * sf), s_sub, 1, t->text);
         }
     }
 
     /* 4. Footer & Countdown Bar */
     const char *footer = "LEFT/RIGHT: SELECT OS    -    ENTER: BOOT    -    R: RESCAN USB/NVME    -    ESC: SHELL";
     draw_text(cv, (status_msg && status_msg[0]) ? status_msg : footer,
-              w / 2, (int)(h * 0.88f), 2, 1, t->subtext);
+              w / 2, (int)(h * 0.88f), s_sub, 1, t->subtext);
 
     if (timer_active && t->timeout_sec > 0) {
-        float bw = 640.0f, bh = 10.0f;
+        float bw = 640.0f * sf, bh = 10.0f * sf;
+        if (bh < 4.0f) bh = 4.0f;
         float bx = (w - bw) * 0.5f;
         float by = h * 0.92f;
         color_t track = {255, 255, 255, 36};
         color_t none  = {0, 0, 0, 0};
-        draw_sdf_rounded_rect(cv, bx, by, bw, bh, 5.0f, track, none, 0);
+        draw_sdf_rounded_rect(cv, bx, by, bw, bh, bh * 0.5f, track, none, 0);
         float frac = (float)remaining_sec / (float)t->timeout_sec;
         if (frac < 0.0f) frac = 0.0f;
         if (frac > 1.0f) frac = 1.0f;
-        draw_sdf_rounded_rect(cv, bx, by, bw * frac, bh, 5.0f, t->accent, none, 0);
+        draw_sdf_rounded_rect(cv, bx, by, bw * frac, bh, bh * 0.5f, t->accent, none, 0);
     }
 
     /* 5. LUKS2 Passphrase Modal Overlay */
@@ -561,30 +577,30 @@ static void render_ui(canvas_t *cv, const theme_config_t *t,
             for (int x = 0; x < w; x++)
                 blend_pixel(cv, x, y, dim);
 
-        float mw = 960.0f, mh = 420.0f;
+        float mw = 960.0f * sf, mh = 420.0f * sf;
         float mx = (w - mw) * 0.5f;
         float my = (h - mh) * 0.5f;
-        draw_sdf_rounded_rect(cv, mx, my, mw, mh, 32.0f, t->card_sel_bg, t->accent, 4.0f);
+        draw_sdf_rounded_rect(cv, mx, my, mw, mh, 32.0f * sf, t->card_sel_bg, t->accent, 4.0f * sf);
 
-        draw_text(cv, "UNLOCK ENCRYPTED ROOT (LUKS2)", w / 2, (int)(my + 58), 3, 1, t->text);
-        draw_text(cv, entries[selected].luks_dev, w / 2, (int)(my + 114), 2, 1, t->subtext);
+        draw_text(cv, "UNLOCK ENCRYPTED ROOT (LUKS2)", w / 2, (int)(my + 58 * sf), s_card, 1, t->text);
+        draw_text(cv, entries[selected].luks_dev, w / 2, (int)(my + 114 * sf), s_sub, 1, t->subtext);
 
-        float ibw = mw - 140.0f, ibh = 84.0f;
-        float ibx = mx + 70.0f, iby = my + 180.0f;
+        float ibw = mw - 140.0f * sf, ibh = 84.0f * sf;
+        float ibx = mx + 70.0f * sf, iby = my + 180.0f * sf;
         color_t box_bg = {8, 12, 22, 245};
-        draw_sdf_rounded_rect(cv, ibx, iby, ibw, ibh, 18.0f, box_bg, t->accent, 2.5f);
+        draw_sdf_rounded_rect(cv, ibx, iby, ibw, ibh, 18.0f * sf, box_bg, t->accent, 2.5f * sf);
 
         size_t plen = luks_pass ? strlen(luks_pass) : 0;
         if (plen == 0) {
-            draw_text(cv, "TYPE PASSPHRASE AND PRESS ENTER...", (int)(ibx + 28), (int)(iby + 34), 2, 0, t->subtext);
+            draw_text(cv, "TYPE PASSPHRASE AND PRESS ENTER...", (int)(ibx + 28 * sf), (int)(iby + 34 * sf), s_sub, 0, t->subtext);
         } else {
             char mask[128] = {0};
             for (size_t k = 0; k < plen && k < 36; k++) strcat(mask, "* ");
-            draw_text(cv, mask, (int)(ibx + 28), (int)(iby + 30), 3, 0, t->accent);
+            draw_text(cv, mask, (int)(ibx + 28 * sf), (int)(iby + 30 * sf), s_card, 0, t->accent);
         }
 
         draw_text(cv, "ENTER: UNLOCK & KEXEC BOOT    -    ESC: CANCEL",
-                  w / 2, (int)(my + mh - 64), 2, 1, t->subtext);
+                  w / 2, (int)(my + mh - 64 * sf), s_sub, 1, t->subtext);
     }
 }
 

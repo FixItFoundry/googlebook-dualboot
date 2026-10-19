@@ -1,27 +1,34 @@
 #!/bin/bash
 # googleboot-scan
 # Petitboot-style OS discovery & kexec/Slot-A/UEFI-bridge execution backend for googleboot-menu.
+# Uses pure built-in bash string manipulation (zero dependency on awk/cut/ls/basename in minimal initramfs).
 #
 # Output format for `--list`:
 #   id|title|subtitle|os_type|needs_luks(0/1)|luks_dev|action_cmd
 
-set -euo pipefail
+set -uo pipefail
 
 MNT_BASE="/run/googleboot"
 BOOT_MNT="$MNT_BASE/boot"
 USB_MNT="$MNT_BASE/usb"
 STATE_FILE="$MNT_BASE/entries.db"
-mkdir -p "$BOOT_MNT" "$USB_MNT"
+mkdir -p "$BOOT_MNT" "$USB_MNT" 2>/dev/null || true
+
+modprobe nvme nvme_core ext4 btrfs vfat fat usb_storage uas 2>/dev/null || true
 
 DISK="/dev/nvme0n1"
 BOOT_PART="${GOOGLEBOOK_BOOT_PART:-/dev/nvme0n1p31}"
 ROOT_PART="${GOOGLEBOOK_ROOT_PART:-/dev/nvme0n1p32}"
 
+# Fallback for 2-partition test disks in QEMU (e.g. nvme0n1p1 / nvme0n1p2)
+if [[ ! -b "$BOOT_PART" && -b /dev/nvme0n1p1 ]]; then
+  BOOT_PART="/dev/nvme0n1p1"
+  ROOT_PART="/dev/nvme0n1p2"
+fi
+
 mount_boot_ro() {
-  if ! mountpoint -q "$BOOT_MNT" 2>/dev/null; then
-    if [[ -b "$BOOT_PART" ]]; then
-      mount -o ro "$BOOT_PART" "$BOOT_MNT" 2>/dev/null || true
-    fi
+  if [[ -b "$BOOT_PART" ]] && [[ ! -d "$BOOT_MNT/loader" && ! -d "$BOOT_MNT/EFI" ]]; then
+    mount -o ro "$BOOT_PART" "$BOOT_MNT" 2>/dev/null || true
   fi
 }
 
@@ -37,7 +44,7 @@ detect_os_type() {
 }
 
 scan_entries() {
-  : > "$STATE_FILE"
+  : > "$STATE_FILE" 2>/dev/null || true
   mount_boot_ro
 
   local needs_luks=0
@@ -47,72 +54,81 @@ scan_entries() {
 
   # 1. Scan BootLoaderSpec (BLS) entries on /boot (/loader/entries/*.conf)
   if [[ -d "$BOOT_MNT/loader/entries" ]]; then
-    for conf in $(ls -1r "$BOOT_MNT"/loader/entries/*.conf 2>/dev/null); do
+    for conf in "$BOOT_MNT"/loader/entries/*.conf; do
       [[ -f "$conf" ]] || continue
       [[ "$conf" == *rescue* ]] && continue
-      local id title version linux initrd options os_type
-      id="bls:$(basename "$conf" .conf)"
-      title=$(awk '/^title /{sub(/^title +/, ""); print; exit}' "$conf")
-      version=$(awk '/^version /{sub(/^version +/, ""); print; exit}' "$conf")
-      linux=$(awk '/^linux /{sub(/^linux +/, ""); print; exit}' "$conf")
-      initrd=$(awk '/^initrd /{sub(/^initrd +/, ""); print; exit}' "$conf")
-      options=$(awk '/^options /{sub(/^options +/, ""); print; exit}' "$conf")
+      local bn="${conf##*/}"
+      local id="bls:${bn%.conf}"
+      local title="" version="" linux="" initrd="" options="" k v
+      while IFS=' ' read -r k v; do
+        case "$k" in
+          title)   title="${v^^}" ;;
+          version) version="${v^^}" ;;
+          linux)   linux="$v" ;;
+          initrd)  initrd="$v" ;;
+          options) options="$v" ;;
+        esac
+      done < "$conf"
       [[ -n "$linux" && -f "$BOOT_MNT/$linux" ]] || continue
 
+      local os_type
       os_type=$(detect_os_type "$title")
-      echo "${id}|${title:-Linux}|Kernel ${version} • Direct kexec|${os_type}|${needs_luks}|${ROOT_PART}|/usr/local/bin/googleboot-scan --boot ${id}"
+      echo "${id}|${title:-LINUX}|KERNEL ${version} - DIRECT KEXEC|${os_type}|${needs_luks}|${ROOT_PART}|/usr/local/bin/googleboot-scan --boot ${id}"
       echo "${id}|${BOOT_MNT}/${linux}|${BOOT_MNT}/${initrd}|${options}" >> "$STATE_FILE"
     done
   fi
 
   # Fallback if no BLS entries found but vmlinuz-* exists on /boot
-  if [[ ! -s "$STATE_FILE" ]] && compgen -G "$BOOT_MNT/vmlinuz-*" >/dev/null 2>&1; then
-    for vmlinuz in $(ls -1r "$BOOT_MNT"/vmlinuz-* 2>/dev/null); do
+  if [[ ! -s "$STATE_FILE" ]]; then
+    for vmlinuz in "$BOOT_MNT"/vmlinuz-*; do
+      [[ -f "$vmlinuz" ]] || continue
       [[ "$vmlinuz" == *rescue* ]] && continue
       local kver="${vmlinuz##*vmlinuz-}"
       local initrd="$BOOT_MNT/initramfs-${kver}.img"
       [[ -f "$initrd" ]] || initrd="$BOOT_MNT/initrd.img-${kver}"
       local id="kver:${kver}"
-      local root_uuid luks_uuid cmdline
+      local luks_uuid="" cmdline
       luks_uuid=$(cryptsetup luksUUID "$ROOT_PART" 2>/dev/null || true)
       cmdline="console=tty0 rw rootflags=subvol=root rd.luks.uuid=${luks_uuid} clk_ignore_unused selinux=0"
-      echo "${id}|Fedomakase Linux|Kernel ${kver} • Omarchy Hyprland|omarchy|${needs_luks}|${ROOT_PART}|/usr/local/bin/googleboot-scan --boot ${id}"
+      echo "${id}|FEDOMAKASE LINUX|KERNEL ${kver^^} - OMARCHY|omarchy|${needs_luks}|${ROOT_PART}|/usr/local/bin/googleboot-scan --boot ${id}"
       echo "${id}|${vmlinuz}|${initrd}|${cmdline}" >> "$STATE_FILE"
     done
   fi
 
   # 2. Android 17 (Slot A One-Shot Boot)
-  echo "android|Android 17|Google Aluminum OS • Slot A (One-Shot)|android|0||/usr/local/bin/googleboot-scan --boot android"
+  echo "android|ANDROID 17|ALUMINUM OS - SLOT A (ONE-SHOT)|android|0||/usr/local/bin/googleboot-scan --boot android"
 
   # 3. Windows 11 Bare-Metal (via U-Boot EFI / EDK2 UEFI Bridge payload)
   if [[ -f "$BOOT_MNT/uefi-bridge.bzImage" ]] || [[ -d "$BOOT_MNT/EFI/Microsoft/Boot" ]]; then
-    echo "windows|Windows 11|Bare-Metal UEFI Bridge -> bootmgfw.efi|windows|0||/usr/local/bin/googleboot-scan --boot windows"
+    echo "windows|WINDOWS 11|UEFI BRIDGE -> BOOTMGFW.EFI|windows|0||/usr/local/bin/googleboot-scan --boot windows"
   fi
 
   # 4. Scan External USB Drives for Live Linux ISOs (Fedora, Arch, Ubuntu, etc.)
-  for dev in /dev/sd*[0-9] /dev/sd[a-z]; do
+  for dev in /dev/sd*[0-9] /dev/sd[a-z] /dev/vd*[0-9] /dev/vd[a-z]; do
     [[ -b "$dev" ]] || continue
-    local mp="$USB_MNT/$(basename "$dev")"
-    mkdir -p "$mp"
+    local bdev="${dev##*/}"
+    local mp="$USB_MNT/$bdev"
+    mkdir -p "$mp" 2>/dev/null || true
     if mount -o ro "$dev" "$mp" 2>/dev/null; then
       local label
-      label=$(blkid -s LABEL -o value "$dev" 2>/dev/null || basename "$dev")
+      label=$(blkid -s LABEL -o value "$dev" 2>/dev/null || echo "$bdev")
+      label="${label^^}"
       if [[ -f "$mp/images/pxeboot/vmlinuz" && -f "$mp/images/pxeboot/initrd.img" ]]; then
-        local id="usb:$(basename "$dev")"
+        local id="usb:$bdev"
         local cmdline="root=live:CDLABEL=${label} rd.live.image quiet rhgb"
-        echo "${id}|Live USB: ${label}|Fedora / Omarchy Live Installer (${dev})|usb|0||/usr/local/bin/googleboot-scan --boot ${id}"
+        echo "${id}|LIVE USB: ${label}|FEDORA / OMARCHY LIVE ISO|usb|0||/usr/local/bin/googleboot-scan --boot ${id}"
         echo "${id}|${mp}/images/pxeboot/vmlinuz|${mp}/images/pxeboot/initrd.img|${cmdline}" >> "$STATE_FILE"
       elif [[ -f "$mp/arch/boot/x86_64/vmlinuz-linux" && -f "$mp/arch/boot/x86_64/initramfs-linux.img" ]]; then
-        local id="usb:$(basename "$dev")"
+        local id="usb:$bdev"
         local cmdline="archisobasedir=arch archisolabel=${label} cow_spacesize=4G"
-        echo "${id}|Live USB: ${label}|Arch Linux Live ISO (${dev})|arch|0||/usr/local/bin/googleboot-scan --boot ${id}"
+        echo "${id}|LIVE USB: ${label}|ARCH LINUX LIVE ISO|arch|0||/usr/local/bin/googleboot-scan --boot ${id}"
         echo "${id}|${mp}/arch/boot/x86_64/vmlinuz-linux|${mp}/arch/boot/x86_64/initramfs-linux.img|${cmdline}" >> "$STATE_FILE"
       elif [[ -f "$mp/casper/vmlinuz" ]]; then
-        local id="usb:$(basename "$dev")"
-        local initrd
-        initrd=$(ls "$mp"/casper/initrd* 2>/dev/null | head -1)
+        local id="usb:$bdev"
+        local initrd=""
+        for ir in "$mp"/casper/initrd*; do [[ -f "$ir" ]] && { initrd="$ir"; break; }; done
         local cmdline="boot=casper quiet splash ---"
-        echo "${id}|Live USB: ${label}|Ubuntu / Debian Live ISO (${dev})|ubuntu|0||/usr/local/bin/googleboot-scan --boot ${id}"
+        echo "${id}|LIVE USB: ${label}|UBUNTU / DEBIAN LIVE ISO|ubuntu|0||/usr/local/bin/googleboot-scan --boot ${id}"
         echo "${id}|${mp}/casper/vmlinuz|${initrd}|${cmdline}" >> "$STATE_FILE"
       else
         umount "$mp" 2>/dev/null || true
@@ -142,23 +158,21 @@ boot_entry() {
       ;;
     *)
       [[ -f "$STATE_FILE" ]] || scan_entries >/dev/null
-      local line
-      line=$(awk -F'|' -v id="$target_id" '$1==id{print; exit}' "$STATE_FILE")
-      [[ -n "$line" ]] || { echo "Error: boot target $target_id not found" >&2; exit 1; }
-
-      local kernel initrd cmdline
-      kernel=$(echo "$line" | cut -d'|' -f2)
-      initrd=$(echo "$line" | cut -d'|' -f3)
-      cmdline=$(echo "$line" | cut -d'|' -f4-)
-
-      # Ensure Coreboot framebuffer parameters and root flags are preserved across kexec
-      echo "[googleboot-scan] kexec loading $kernel (initrd=$initrd)..."
-      if [[ -n "$initrd" && -f "$initrd" ]]; then
-        kexec -l "$kernel" --initrd="$initrd" --command-line="$cmdline"
-      else
-        kexec -l "$kernel" --command-line="$cmdline"
-      fi
-      systemctl kexec 2>/dev/null || kexec -e
+      local fid fkernel finitrd fcmdline
+      while IFS='|' read -r fid fkernel finitrd fcmdline; do
+        if [[ "$fid" == "$target_id" ]]; then
+          echo "[googleboot-scan] kexec loading $fkernel (initrd=$finitrd)..."
+          if [[ -n "$finitrd" && -f "$finitrd" ]]; then
+            kexec -l "$fkernel" --initrd="$finitrd" --command-line="$fcmdline"
+          else
+            kexec -l "$fkernel" --command-line="$fcmdline"
+          fi
+          systemctl kexec 2>/dev/null || kexec -e
+          exit 0
+        fi
+      done < "$STATE_FILE"
+      echo "Error: boot target $target_id not found" >&2
+      exit 1
       ;;
   esac
 }

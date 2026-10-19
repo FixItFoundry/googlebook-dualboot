@@ -127,8 +127,8 @@ sudo googlebook-switch-slot b
 
 ---
 
-## 6. Installing Other Linux Distros & Advanced OS Switching
+## 6. Installing Other Linux Distros, Graphical `kexec` Menu & Bare-Metal Windows 11
 
-See [`docs/ANY_DISTRO_AND_OS_SWITCHING.md`](docs/ANY_DISTRO_AND_OS_SWITCHING.md) for:
-- Booting **any Linux distribution** (Arch, Vanilla Omarchy, Ubuntu, Debian, NixOS, CachyOS) using either the Universal Slot B Packer or a permanent **Slot B `kexec` Bootloader**.
-- One-shot vs. persistent switching between **Android 17 (Slot A)** and **Linux (Slot B)** from both Linux and Android.
+- **[`googleboot-menu/`](googleboot-menu/README.md)**: Graphical DRM/KMS + `kexec` universal bootloader (`2880x1800` OLED) with live-editable themes (`theme.conf`), built-in LUKS2 passphrase modal, hotplug USB ISO scanner, and One-Shot Android 17 slot switching.
+- **[`docs/ANY_DISTRO_AND_OS_SWITCHING.md`](docs/ANY_DISTRO_AND_OS_SWITCHING.md)**: Booting **any Linux distribution** (Arch, Vanilla Omarchy, Ubuntu, Debian, NixOS, CachyOS) and switching between Android 17 (Slot A) and Linux (Slot B).
+- **[`docs/WINDOWS_11_BARE_METAL_AND_CROSECBUS.md`](docs/WINDOWS_11_BARE_METAL_AND_CROSECBUS.md)**: Bare-metal Windows 11 chainloading via the RAM-resident **Das U-Boot `x86_64` UEFI Bridge** (`uefi-bridge.bzImage` -> `bootmgfw.efi`) and source-level analysis of **[`coolstar/crosecbus`](https://github.com/coolstar/crosecbus)** on Intel Panther Lake (`ACPI\GOOG0004`).

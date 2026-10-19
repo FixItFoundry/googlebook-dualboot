@@ -114,6 +114,39 @@ for menu_installer in \
   fi
 done
 
+for sync_script in \
+  "$SELF_DIR/bin/googlebook-sysroot-sync" \
+  "/usr/share/omarchy/bin/googlebook-sysroot-sync" \
+  "/usr/local/bin/googlebook-sysroot-sync" \
+  "/usr/bin/googlebook-sysroot-sync"; do
+  if [[ -f "$sync_script" ]]; then
+    mkdir -p "$W/unpacked/usr/bin" "$W/unpacked/usr/local/bin" \
+             "$W/unpacked/etc/systemd/system/initrd.target.wants" \
+             "$W/unpacked/etc/systemd/system/initrd-switch-root.target.wants"
+    cp -f "$sync_script" "$W/unpacked/usr/bin/googlebook-sysroot-sync"
+    cp -f "$sync_script" "$W/unpacked/usr/local/bin/googlebook-sysroot-sync"
+    chmod 755 "$W/unpacked/usr/bin/googlebook-sysroot-sync" "$W/unpacked/usr/local/bin/googlebook-sysroot-sync"
+    cat > "$W/unpacked/etc/systemd/system/googlebook-sysroot-sync.service" << 'SYNCSVCEOF'
+[Unit]
+Description=GoogleBook Moonstone Sysroot Module & Omarchy Sync
+DefaultDependencies=no
+After=initrd-root-fs.target sysroot.mount
+Before=initrd-switch-root.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/googlebook-sysroot-sync
+RemainAfterExit=yes
+
+[Install]
+WantedBy=initrd.target initrd-switch-root.target
+SYNCSVCEOF
+    ln -sf ../googlebook-sysroot-sync.service "$W/unpacked/etc/systemd/system/initrd.target.wants/googlebook-sysroot-sync.service"
+    ln -sf ../googlebook-sysroot-sync.service "$W/unpacked/etc/systemd/system/initrd-switch-root.target.wants/googlebook-sysroot-sync.service"
+    break
+  fi
+done
+
 (cd "$W/unpacked" && find . -print0 | cpio --null -o -H newc --quiet | zstd --ultra -22 -T0 > "$W/rd_vendor")
 (cd "$W/split_init" && find . -print0 | cpio --null -o -H newc --quiet | zstd --ultra -22 -T0 > "$W/rd_init")
 

@@ -19,14 +19,8 @@ mkdir -p "$BOOT_MNT" "$USB_MNT" 2>/dev/null || true
 modprobe nvme nvme_core ext4 btrfs vfat fat dm_crypt usb_storage uas 2>/dev/null || true
 
 DISK="${GOOGLEBOOK_DISK:-/dev/nvme0n1}"
-BOOT_PART="${GOOGLEBOOK_BOOT_PART:-/dev/nvme0n1p31}"
+BOOT_PART="${GOOGLEBOOK_BOOT_PART:-/dev/nvme0n1p11}"
 ROOT_PART="${GOOGLEBOOK_ROOT_PART:-/dev/nvme0n1p32}"
-
-# Fallback for 2-partition test disks in QEMU (e.g. nvme0n1p1 / nvme0n1p2)
-if [[ ! -b "$BOOT_PART" && -b /dev/nvme0n1p1 ]]; then
-  BOOT_PART="/dev/nvme0n1p1"
-  ROOT_PART="/dev/nvme0n1p2"
-fi
 
 is_luks_part() {
   local dev="$1"
@@ -52,10 +46,65 @@ get_luks_uuid() {
   echo "$uuid"
 }
 
-mount_boot_ro() {
-  if [[ -b "$BOOT_PART" ]] && [[ ! -d "$BOOT_MNT/loader" && ! -d "$BOOT_MNT/EFI" ]]; then
-    mount -o ro "$BOOT_PART" "$BOOT_MNT" 2>/dev/null || true
+has_boot_files() {
+  [[ -d "$BOOT_MNT/loader/entries" || -d "$BOOT_MNT/EFI" || -f "$BOOT_MNT/uefi-bridge.bzImage" ]] && return 0
+  local f
+  for f in "$BOOT_MNT"/vmlinuz-*; do
+    [[ -f "$f" ]] && return 0
+  done
+  return 1
+}
+
+detect_root_part() {
+  if [[ -b "$ROOT_PART" ]] && is_luks_part "$ROOT_PART"; then
+    return 0
   fi
+  if [[ -b /dev/nvme0n1p32 ]] && is_luks_part /dev/nvme0n1p32; then
+    ROOT_PART="/dev/nvme0n1p32"
+    return 0
+  fi
+  local cand
+  while IFS= read -r cand; do
+    if [[ -n "$cand" && -b "$cand" ]]; then
+      ROOT_PART="$cand"
+      return 0
+    fi
+  done < <(blkid -t TYPE=crypto_LUKS -o device 2>/dev/null || true)
+
+  if [[ ! -b "$ROOT_PART" && -b /dev/nvme0n1p2 ]]; then
+    ROOT_PART="/dev/nvme0n1p2"
+  fi
+}
+
+mount_boot_ro() {
+  detect_root_part
+  if has_boot_files; then
+    return 0
+  fi
+
+  local candidates=("$BOOT_PART" "/dev/nvme0n1p11" "/dev/nvme0n1p1" "/dev/nvme0n1p31")
+  local blk_dev
+  while IFS= read -r blk_dev; do
+    [[ -n "$blk_dev" ]] && candidates+=("$blk_dev")
+  done < <(blkid -t TYPE=ext4 -o device 2>/dev/null || true; blkid -t TYPE=vfat -o device 2>/dev/null || true)
+
+  local cand seen=""
+  for cand in "${candidates[@]}"; do
+    [[ -b "$cand" ]] || continue
+    [[ "$cand" == "$ROOT_PART" ]] && continue
+    [[ " $seen " == *" $cand "* ]] && continue
+    seen="$seen $cand"
+
+    umount "$BOOT_MNT" >/dev/null 2>&1 || true
+    if mount -o ro "$cand" "$BOOT_MNT" >/dev/null 2>&1; then
+      if has_boot_files; then
+        BOOT_PART="$cand"
+        return 0
+      fi
+      umount "$BOOT_MNT" >/dev/null 2>&1 || true
+    fi
+  done
+  return 1
 }
 
 detect_os_type() {
@@ -70,6 +119,7 @@ detect_os_type() {
 }
 
 unlock_luks() {
+  detect_root_part
   local dev="${GOOGLEBOOT_LUKS_DEV:-$ROOT_PART}"
   local pass="${GOOGLEBOOT_LUKS_PASS:-}"
   [[ -b "$dev" ]] || { echo "Error: LUKS device $dev not found" >&2; return 1; }
@@ -106,7 +156,7 @@ unlock_luks() {
 
 scan_entries() {
   : > "$STATE_FILE" 2>/dev/null || true
-  mount_boot_ro
+  mount_boot_ro || true
 
   local needs_luks=0
   if is_luks_part "$ROOT_PART"; then
@@ -116,6 +166,8 @@ scan_entries() {
       needs_luks=1
     fi
   fi
+
+  local found_linux=0
 
   # 1. Scan BootLoaderSpec (BLS) entries on /boot (/loader/entries/*.conf)
   if [[ -d "$BOOT_MNT/loader/entries" ]]; then
@@ -138,13 +190,19 @@ scan_entries() {
 
       local os_type
       os_type=$(detect_os_type "$title")
-      echo "${id}|${title:-LINUX}|KERNEL ${version} - DIRECT BOOT|${os_type}|${needs_luks}|${ROOT_PART}|/usr/local/bin/googleboot-scan --boot ${id}"
+      local card_title="${title:-FEDOMAKASE LINUX}"
+      if [[ $found_linux -eq 0 ]]; then
+        card_title="FEDOMAKASE LINUX"
+        os_type="omarchy"
+      fi
+      echo "${id}|${card_title}|KERNEL ${version} - DIRECT BOOT|${os_type}|${needs_luks}|${ROOT_PART}|/usr/local/bin/googleboot-scan --boot ${id}"
       echo "${id}|${BOOT_MNT}/${linux}|${BOOT_MNT}/${initrd}|${options}" >> "$STATE_FILE"
+      found_linux=1
     done
   fi
 
   # Fallback if no BLS entries found but vmlinuz-* exists on /boot
-  if [[ ! -s "$STATE_FILE" ]]; then
+  if [[ $found_linux -eq 0 ]]; then
     for vmlinuz in "$BOOT_MNT"/vmlinuz-*; do
       [[ -f "$vmlinuz" ]] || continue
       [[ "$vmlinuz" == *rescue* ]] && continue
@@ -157,7 +215,18 @@ scan_entries() {
       cmdline="console=tty0 rw rootflags=subvol=root rd.luks.uuid=${luks_uuid} clk_ignore_unused selinux=0"
       echo "${id}|FEDOMAKASE LINUX|KERNEL ${kver^^} - OMARCHY|omarchy|${needs_luks}|${ROOT_PART}|/usr/local/bin/googleboot-scan --boot ${id}"
       echo "${id}|${vmlinuz}|${initrd}|${cmdline}" >> "$STATE_FILE"
+      found_linux=1
     done
+  fi
+
+  # Guaranteed fallback: whenever /dev/nvme0n1p32 or a LUKS root partition exists on disk,
+  # always emit the primary FEDOMAKASE LINUX card even if /boot is unmounted or empty.
+  if [[ $found_linux -eq 0 ]]; then
+    if [[ -b "$ROOT_PART" ]] || [[ -b /dev/nvme0n1p32 ]] || is_luks_part "$ROOT_PART"; then
+      echo "fedomakase|FEDOMAKASE LINUX|FEDORA 44 - OMARCHY HYPRLAND|omarchy|${needs_luks}|${ROOT_PART}|/usr/local/bin/googleboot-scan --boot fedomakase"
+      echo "fedomakase|SlotB-Direct|SlotB-Initrd|root=${ROOT_PART}" >> "$STATE_FILE"
+      found_linux=1
+    fi
   fi
 
   # 2. Android 17 (Slot A One-Shot Boot)
@@ -174,7 +243,7 @@ scan_entries() {
     local bdev="${dev##*/}"
     local mp="$USB_MNT/$bdev"
     mkdir -p "$mp" 2>/dev/null || true
-    if mount -o ro "$dev" "$mp" 2>/dev/null; then
+    if mount -o ro "$dev" "$mp" >/dev/null 2>&1; then
       local label
       label=$(blkid -s LABEL -o value "$dev" 2>/dev/null || echo "$bdev")
       label="${label^^}"
@@ -204,17 +273,19 @@ scan_entries() {
 
 boot_entry() {
   local target_id="$1"
-  mount_boot_ro
+  mount_boot_ro || true
 
   case "$target_id" in
     android)
       umount "$BOOT_MNT" 2>/dev/null || true
       if [[ -x /usr/local/bin/googleboot-menu ]]; then
         /usr/local/bin/googleboot-menu --switch-slot android-once --disk "$DISK" --reboot
-      else
+      elif [[ -x /usr/local/bin/googlebook-switch-slot ]]; then
         /usr/local/bin/googlebook-switch-slot android-once --reboot
       fi
-      exit 0
+      sync
+      reboot -f 2>/dev/null || echo b > /proc/sysrq-trigger
+      exit 1
       ;;
     windows)
       if [[ -f "$BOOT_MNT/uefi-bridge.bzImage" ]]; then
@@ -232,6 +303,7 @@ boot_entry() {
         unlock_luks || exit 1
       fi
       umount "$BOOT_MNT" 2>/dev/null || true
+      udevadm settle --timeout=5 2>/dev/null || true
       exit 0
       ;;
     *)
@@ -246,8 +318,8 @@ boot_entry() {
           running_kver=$(uname -r 2>/dev/null || true)
           # If running inside Slot B initramfs and selected kernel matches running Slot B kernel,
           # skip redundant kexec so systemd mounts /sysroot, runs googlebook-sysroot-sync, and switch-roots cleanly!
-          if [[ -f /etc/initrd-release && -n "$running_kver" && "$fkernel" == *"$running_kver"* && "$target_id" != usb:* ]]; then
-            echo "[googleboot-scan] Target kernel matches running Slot B ($running_kver); proceeding via direct switch-root..."
+          if [[ -f /etc/initrd-release && ( "$fkernel" == "SlotB-Direct" || ( -n "$running_kver" && "$fkernel" == *"$running_kver"* ) ) && "$target_id" != usb:* ]]; then
+            echo "[googleboot-scan] Proceeding via direct Slot B switch-root..."
             umount "$BOOT_MNT" 2>/dev/null || true
             udevadm settle --timeout=5 2>/dev/null || true
             exit 0

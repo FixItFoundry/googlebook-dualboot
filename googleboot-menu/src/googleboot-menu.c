@@ -4,14 +4,9 @@
  * Zero-Dependency Graphical DRM/KMS kexec Bootloader UI for the
  * Acer Googlebook 14 (Moonstone, 2880x1800 OLED Coreboot Framebuffer).
  *
- * Why zero-dependency?
- *   - Runs directly in the 32 MiB Slot B initramfs (vendor_boot_b) using ONLY
- *     standard libc, libm, and libz (~65 KB binary, zero 15 MB GTK/Cairo/Wayland bloat).
- *   - Talks directly to /dev/dri/card0 (simpledrm / xe) via raw Linux DRM KMS ioctls.
- *   - Compiles out-of-the-box on both Linux (x86_64) and macOS (for instant local theme previews).
- *   - Reads live theme customizations from /boot/googlebook-theme/theme.conf.
- *   - Discovers OS entries via `googleboot-scan --list` (Linux BLS/GRUB, Android 17 Slot A,
- *     Windows 11 Bare-Metal UEFI Bridge, and hotplugged Live USB ISOs).
+ * Styled after native Googlebook OS (ChromeOS / Aluminum OS Material 3 Dark)
+ * splash screens and system modals, with an embedded zlib-compressed
+ * anti-aliased geometric sans-serif glyph atlas (Google Sans / Avenir Next style).
  */
 
 #include <stdio.h>
@@ -19,6 +14,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+#include <strings.h>
+#include <ctype.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -31,9 +28,12 @@
 #include <sys/stat.h>
 #include <zlib.h>
 
+#include "google_sans_atlas.h"
+
 #ifdef __linux__
 #include <linux/input.h>
 #include <linux/ioctl.h>
+#include <sys/reboot.h>
 
 /* Minimal Linux DRM/KMS ABI definitions (avoids needing libdrm headers/shared libs) */
 #define DRM_IOCTL_BASE                  'd'
@@ -146,6 +146,17 @@ typedef struct {
     int stride_px;
 } canvas_t;
 
+static uint8_t g_atlas_raw[GS_ATLAS_RAW_SIZE];
+static bool g_atlas_ready = false;
+
+static void ensure_font_atlas(void) {
+    if (g_atlas_ready) return;
+    uLongf dest_len = GS_ATLAS_RAW_SIZE;
+    if (uncompress(g_atlas_raw, &dest_len, gs_atlas_zlib, GS_ATLAS_ZLIB_SIZE) == Z_OK) {
+        g_atlas_ready = true;
+    }
+}
+
 static color_t parse_hex(const char *hex, uint8_t alpha) {
     color_t c = {0, 0, 0, alpha};
     if (!hex) return c;
@@ -161,19 +172,19 @@ static color_t parse_hex(const char *hex, uint8_t alpha) {
 
 static void init_default_theme(theme_config_t *t) {
     memset(t, 0, sizeof(*t));
-    snprintf(t->title, sizeof(t->title), "GOOGLEBOOK // MOONSTONE");
-    snprintf(t->subtitle, sizeof(t->subtitle), "SELECT OPERATING SYSTEM   -   COREBOOT + KEXEC UNIVERSAL BOOTLOADER");
-    t->bg_top      = parse_hex("#070B12", 255);
-    t->bg_bot      = parse_hex("#111827", 255);
-    t->card_bg     = parse_hex("#1E293B", 190);
-    t->card_sel_bg = parse_hex("#162B4D", 240);
-    t->accent      = parse_hex("#38BDF8", 255);
-    t->text        = parse_hex("#F8FAFC", 255);
-    t->subtext     = parse_hex("#94A3B8", 255);
-    t->card_width  = 520;
-    t->card_height = 580;
-    t->card_radius = 32;
-    t->card_gap    = 52;
+    snprintf(t->title, sizeof(t->title), "Googlebook");
+    snprintf(t->subtitle, sizeof(t->subtitle), "Select an operating system to start");
+    t->bg_top      = parse_hex("#202124", 255);
+    t->bg_bot      = parse_hex("#1B1C1F", 255);
+    t->card_bg     = parse_hex("#292A2D", 255);
+    t->card_sel_bg = parse_hex("#303134", 255);
+    t->accent      = parse_hex("#8AB4F8", 255);
+    t->text        = parse_hex("#E8EAED", 255);
+    t->subtext     = parse_hex("#9AA0A6", 255);
+    t->card_width  = 540;
+    t->card_height = 560;
+    t->card_radius = 28;
+    t->card_gap    = 44;
     t->timeout_sec = 6;
 }
 
@@ -293,168 +304,457 @@ static void draw_sdf_circle(canvas_t *cv, float cx, float cy, float r, color_t f
     draw_sdf_rounded_rect(cv, cx - r, cy - r, r * 2.0f, r * 2.0f, r, fill, ring, ring_w);
 }
 
-/* Built-in crisp 8x8 ASCII bitmap font (scaled smoothly with bilinear/subpixel AA) */
-static const uint8_t font8x8_basic[128][8] = {
-    [' '] = {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
-    ['!'] = {0x18,0x3C,0x3C,0x18,0x18,0x00,0x18,0x00},
-    ['"'] = {0x36,0x36,0x14,0x00,0x00,0x00,0x00,0x00},
-    ['#'] = {0x36,0x36,0x7F,0x36,0x7F,0x36,0x36,0x00},
-    ['&'] = {0x1C,0x36,0x1C,0x3B,0x6E,0x33,0x6E,0x00},
-    ['('] = {0x30,0x18,0x0C,0x0C,0x0C,0x18,0x30,0x00},
-    [')'] = {0x0C,0x18,0x30,0x30,0x30,0x18,0x0C,0x00},
-    ['*'] = {0x00,0x66,0x3C,0xFF,0x3C,0x66,0x00,0x00},
-    ['+'] = {0x00,0x18,0x18,0x7E,0x18,0x18,0x00,0x00},
-    [','] = {0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x0C},
-    ['-'] = {0x00,0x00,0x00,0x7E,0x00,0x00,0x00,0x00},
-    ['.'] = {0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x00},
-    ['/'] = {0x60,0x30,0x18,0x0C,0x06,0x03,0x01,0x00},
-    ['0'] = {0x3E,0x63,0x73,0x7B,0x6F,0x67,0x3E,0x00},
-    ['1'] = {0x18,0x1E,0x18,0x18,0x18,0x18,0x7E,0x00},
-    ['2'] = {0x3E,0x63,0x30,0x1C,0x06,0x63,0x7F,0x00},
-    ['3'] = {0x3E,0x63,0x30,0x1C,0x30,0x63,0x3E,0x00},
-    ['4'] = {0x38,0x3C,0x36,0x33,0x7F,0x30,0x78,0x00},
-    ['5'] = {0x7F,0x03,0x3F,0x60,0x60,0x63,0x3E,0x00},
-    ['6'] = {0x1C,0x06,0x03,0x3F,0x63,0x63,0x3E,0x00},
-    ['7'] = {0x7F,0x63,0x30,0x18,0x0C,0x0C,0x0C,0x00},
-    ['8'] = {0x3E,0x63,0x63,0x3E,0x63,0x63,0x3E,0x00},
-    ['9'] = {0x3E,0x63,0x63,0x7E,0x60,0x30,0x1E,0x00},
-    [':'] = {0x00,0x18,0x18,0x00,0x00,0x18,0x18,0x00},
-    ['<'] = {0x30,0x18,0x0C,0x06,0x0C,0x18,0x30,0x00},
-    ['='] = {0x00,0x00,0x7E,0x00,0x00,0x7E,0x00,0x00},
-    ['>'] = {0x06,0x0C,0x18,0x30,0x18,0x0C,0x06,0x00},
-    ['?'] = {0x3E,0x63,0x30,0x18,0x18,0x00,0x18,0x00},
-    ['['] = {0x3C,0x0C,0x0C,0x0C,0x0C,0x0C,0x3C,0x00},
-    [']'] = {0x3C,0x30,0x30,0x30,0x30,0x30,0x3C,0x00},
-    ['_'] = {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xFF},
-    ['A'] = {0x1C,0x36,0x63,0x63,0x7F,0x63,0x63,0x00},
-    ['B'] = {0x3F,0x66,0x66,0x3E,0x66,0x66,0x3F,0x00},
-    ['C'] = {0x3C,0x66,0x03,0x03,0x03,0x66,0x3C,0x00},
-    ['D'] = {0x1F,0x36,0x66,0x66,0x66,0x36,0x1F,0x00},
-    ['E'] = {0x7F,0x46,0x16,0x1E,0x16,0x46,0x7F,0x00},
-    ['F'] = {0x7F,0x46,0x16,0x1E,0x16,0x06,0x0F,0x00},
-    ['G'] = {0x3C,0x66,0x03,0x03,0x73,0x66,0x7C,0x00},
-    ['H'] = {0x63,0x63,0x63,0x7F,0x63,0x63,0x63,0x00},
-    ['I'] = {0x3C,0x18,0x18,0x18,0x18,0x18,0x3C,0x00},
-    ['J'] = {0x78,0x30,0x30,0x30,0x33,0x33,0x1E,0x00},
-    ['K'] = {0x67,0x66,0x36,0x1E,0x36,0x66,0x67,0x00},
-    ['L'] = {0x0F,0x06,0x06,0x06,0x46,0x66,0x7F,0x00},
-    ['M'] = {0x63,0x77,0x7F,0x7F,0x6B,0x63,0x63,0x00},
-    ['N'] = {0x63,0x67,0x6F,0x7B,0x73,0x63,0x63,0x00},
-    ['O'] = {0x3E,0x63,0x63,0x63,0x63,0x63,0x3E,0x00},
-    ['P'] = {0x3F,0x66,0x66,0x3E,0x06,0x06,0x0F,0x00},
-    ['Q'] = {0x3E,0x63,0x63,0x63,0x6B,0x33,0x5E,0x00},
-    ['R'] = {0x3F,0x66,0x66,0x3E,0x36,0x66,0x67,0x00},
-    ['S'] = {0x3E,0x63,0x07,0x3E,0x60,0x63,0x3E,0x00},
-    ['T'] = {0x3F,0x2D,0x0C,0x0C,0x0C,0x0C,0x1E,0x00},
-    ['U'] = {0x63,0x63,0x63,0x63,0x63,0x63,0x3E,0x00},
-    ['V'] = {0x63,0x63,0x63,0x63,0x63,0x36,0x1C,0x00},
-    ['W'] = {0x63,0x63,0x63,0x6B,0x7F,0x77,0x63,0x00},
-    ['X'] = {0x63,0x63,0x36,0x1C,0x1C,0x36,0x63,0x00},
-    ['Y'] = {0x33,0x33,0x33,0x1E,0x0C,0x0C,0x1E,0x00},
-    ['Z'] = {0x7F,0x63,0x31,0x18,0x4C,0x66,0x7F,0x00},
-    ['a'] = {0x00,0x00,0x1E,0x30,0x3E,0x33,0x6E,0x00},
-    ['b'] = {0x07,0x06,0x06,0x3E,0x66,0x66,0x3B,0x00},
-    ['c'] = {0x00,0x00,0x1E,0x33,0x03,0x33,0x1E,0x00},
-    ['d'] = {0x38,0x30,0x30,0x3e,0x33,0x33,0x6E,0x00},
-    ['e'] = {0x00,0x00,0x1E,0x33,0x3f,0x03,0x1E,0x00},
-    ['f'] = {0x1C,0x36,0x06,0x0f,0x06,0x06,0x0F,0x00},
-    ['g'] = {0x00,0x00,0x6E,0x33,0x33,0x3E,0x30,0x1F},
-    ['h'] = {0x07,0x06,0x36,0x6E,0x66,0x66,0x67,0x00},
-    ['i'] = {0x18,0x00,0x1E,0x18,0x18,0x18,0x3C,0x00},
-    ['j'] = {0x30,0x00,0x38,0x30,0x30,0x33,0x33,0x1E},
-    ['k'] = {0x07,0x06,0x66,0x36,0x1E,0x36,0x67,0x00},
-    ['l'] = {0x1E,0x18,0x18,0x18,0x18,0x18,0x3C,0x00},
-    ['m'] = {0x00,0x00,0x33,0x7F,0x7F,0x6B,0x63,0x00},
-    ['n'] = {0x00,0x00,0x1F,0x33,0x33,0x33,0x33,0x00},
-    ['o'] = {0x00,0x00,0x1E,0x33,0x33,0x33,0x1E,0x00},
-    ['p'] = {0x00,0x00,0x3B,0x66,0x66,0x3E,0x06,0x0F},
-    ['q'] = {0x00,0x00,0x6E,0x33,0x33,0x3E,0x30,0x78},
-    ['r'] = {0x00,0x00,0x3B,0x6E,0x66,0x06,0x0F,0x00},
-    ['s'] = {0x00,0x00,0x3E,0x03,0x1E,0x30,0x1F,0x00},
-    ['t'] = {0x08,0x0C,0x3E,0x0C,0x0C,0x2C,0x18,0x00},
-    ['u'] = {0x00,0x00,0x33,0x33,0x33,0x33,0x6E,0x00},
-    ['v'] = {0x00,0x00,0x33,0x33,0x33,0x1E,0x0C,0x00},
-    ['w'] = {0x00,0x00,0x63,0x6B,0x7F,0x7F,0x36,0x00},
-    ['x'] = {0x00,0x00,0x63,0x36,0x1C,0x36,0x63,0x00},
-    ['y'] = {0x00,0x00,0x33,0x33,0x33,0x3E,0x30,0x1F},
-    ['z'] = {0x00,0x00,0x3F,0x19,0x0C,0x26,0x3F,0x00},
-};
+/* Soft drop shadow behind elevated Material 3 surfaces (cards & modals) */
+static void draw_soft_shadow(canvas_t *cv, float x, float y, float w, float h, float r, float blur, uint8_t max_alpha) {
+    int x0 = (int)(x - blur);
+    int y0 = (int)(y - blur);
+    int x1 = (int)(x + w + blur);
+    int y1 = (int)(y + h + blur);
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 >= cv->width) x1 = cv->width - 1;
+    if (y1 >= cv->height) y1 = cv->height - 1;
 
-static void draw_text(canvas_t *cv, const char *str, int x, int y, int scale, int align, color_t col) {
-    if (!str || !*str) return;
-    int len = (int)strlen(str);
-    int char_adv = 9 * scale;
-    int total_w = len * char_adv - scale;
-    int start_x = x;
-    if (align == 1) start_x = x - total_w / 2;
-    else if (align == 2) start_x = x - total_w;
+    float cx = x + w * 0.5f;
+    float cy = y + h * 0.5f;
+    float hw = w * 0.5f - r;
+    float hh = h * 0.5f - r;
 
-    for (int i = 0; i < len; i++) {
-        unsigned char ch = (unsigned char)str[i];
-        if (ch >= 128) ch = '-';
-        const uint8_t *glyph = font8x8_basic[ch];
-        int gx_base = start_x + i * char_adv;
-        for (int row = 0; row < 8; row++) {
-            uint8_t bits = glyph[row];
-            if (!bits) continue;
-            for (int col_idx = 0; col_idx < 8; col_idx++) {
-                if (bits & (1u << col_idx)) {
-                    int px = gx_base + col_idx * scale;
-                    int py = y + row * scale;
-                    for (int sy = 0; sy < scale; sy++) {
-                        for (int sx = 0; sx < scale; sx++) {
-                            blend_pixel(cv, px + sx, py + sy, col);
-                        }
-                    }
-                }
+    for (int py = y0; py <= y1; py++) {
+        float dy = fabsf((py + 0.5f) - cy) - hh;
+        for (int px = x0; px <= x1; px++) {
+            float dx = fabsf((px + 0.5f) - cx) - hw;
+            float ox = dx > 0.0f ? dx : 0.0f;
+            float oy = dy > 0.0f ? dy : 0.0f;
+            float dist_out = sqrtf(ox * ox + oy * oy);
+            float dist_in = (dx > dy ? dx : dy);
+            if (dist_in > 0.0f) dist_in = 0.0f;
+            float d = dist_out + dist_in - r;
+            if (d > -2.0f && d < blur) {
+                float t = (d < 0.0f) ? 0.0f : (d / blur);
+                float falloff = (1.0f - t) * (1.0f - t);
+                color_t sc = {0, 0, 0, (uint8_t)(max_alpha * falloff)};
+                blend_pixel(cv, px, py, sc);
             }
         }
     }
 }
 
+/* Anti-aliased line segment (capsule SDF) for crisp vector icons */
+static void draw_sdf_segment(canvas_t *cv, float ax, float ay, float bx, float by, float radius, color_t col) {
+    float min_x = (ax < bx ? ax : bx) - radius - 2.0f;
+    float max_x = (ax > bx ? ax : bx) + radius + 2.0f;
+    float min_y = (ay < by ? ay : by) - radius - 2.0f;
+    float max_y = (ay > by ? ay : by) + radius + 2.0f;
+    int x0 = (int)min_x; if (x0 < 0) x0 = 0;
+    int y0 = (int)min_y; if (y0 < 0) y0 = 0;
+    int x1 = (int)max_x; if (x1 >= cv->width) x1 = cv->width - 1;
+    int y1 = (int)max_y; if (y1 >= cv->height) y1 = cv->height - 1;
+
+    float vx = bx - ax, vy = by - ay;
+    float len2 = vx * vx + vy * vy;
+
+    for (int py = y0; py <= y1; py++) {
+        for (int px = x0; px <= x1; px++) {
+            float wx = (px + 0.5f) - ax;
+            float wy = (py + 0.5f) - ay;
+            float h = (len2 > 0.0001f) ? ((wx * vx + wy * vy) / len2) : 0.0f;
+            if (h < 0.0f) h = 0.0f;
+            if (h > 1.0f) h = 1.0f;
+            float dx = wx - vx * h;
+            float dy = wy - vy * h;
+            float d = sqrtf(dx * dx + dy * dy) - radius;
+            if (d < 0.5f) {
+                float cov = 0.5f - d;
+                if (cov > 1.0f) cov = 1.0f;
+                color_t c = col;
+                c.a = (uint8_t)(col.a * cov);
+                blend_pixel(cv, px, py, c);
+            }
+        }
+    }
+}
+
+/* Decode next glyph code from string (maps UTF-8 bullet '•' \xE2\x80\xA2 or \x7F to glyph 127) */
+static int next_glyph_code(const char **p) {
+    const unsigned char *s = (const unsigned char *)*p;
+    if (!*s) return 0;
+    if (s[0] == 0xE2 && s[1] == 0x80 && s[2] == 0xA2) {
+        *p += 3;
+        return 127;
+    }
+    if (s[0] == 0xC2 && s[1] == 0xB7) {
+        *p += 2;
+        return 127;
+    }
+    int c = s[0];
+    *p += 1;
+    if (c == 127) return 127;
+    if (c < 32 || c > 126) return '-';
+    return c;
+}
+
+static float measure_text_gs(const char *str, float px_size, float tracking) {
+    if (!str || !*str) return 0.0f;
+    float scale = px_size / GS_FONT_BASE_SIZE;
+    float w = 0.0f;
+    const char *p = str;
+    int count = 0;
+    while (*p) {
+        int ch = next_glyph_code(&p);
+        w += gs_glyph_metrics[ch].advance * scale;
+        count++;
+    }
+    if (count > 1) w += (count - 1) * tracking;
+    return w;
+}
+
+static inline float sample_glyph_bilinear(const uint8_t *bmp, int gw, int gh, float u, float v) {
+    if (u < -0.5f || v < -0.5f || u > (float)gw - 0.5f || v > (float)gh - 0.5f) return 0.0f;
+    int x0 = (int)floorf(u);
+    int y0 = (int)floorf(v);
+    float fx = u - (float)x0;
+    float fy = v - (float)y0;
+    int x1 = x0 + 1;
+    int y1 = y0 + 1;
+
+    float v00 = (x0 >= 0 && x0 < gw && y0 >= 0 && y0 < gh) ? bmp[y0 * gw + x0] : 0.0f;
+    float v10 = (x1 >= 0 && x1 < gw && y0 >= 0 && y0 < gh) ? bmp[y0 * gw + x1] : 0.0f;
+    float v01 = (x0 >= 0 && x0 < gw && y1 >= 0 && y1 < gh) ? bmp[y1 * gw + x0] : 0.0f;
+    float v11 = (x1 >= 0 && x1 < gw && y1 >= 0 && y1 < gh) ? bmp[y1 * gw + x1] : 0.0f;
+
+    float top = v00 + (v10 - v00) * fx;
+    float bot = v01 + (v11 - v01) * fx;
+    return top + (bot - top) * fy;
+}
+
+/*
+ * Draw anti-aliased geometric sans-serif text (Google Sans / Avenir Next style).
+ * `y` is the vertical center of the cap-height (so y aligns naturally with original UI layout).
+ */
+static void draw_text_gs(canvas_t *cv, const char *str, float x, float y,
+                         float px_size, int align, color_t col, float tracking) {
+    if (!str || !*str) return;
+    ensure_font_atlas();
+
+    float scale = px_size / GS_FONT_BASE_SIZE;
+    float total_w = measure_text_gs(str, px_size, tracking);
+    float pen_x = x;
+    if (align == 1) pen_x = x - total_w * 0.5f;
+    else if (align == 2) pen_x = x - total_w;
+
+    /* Baseline positioned so `y` sits at top of cap-height (matching prior top-left text convention) */
+    float cap_h = 54.0f * scale;
+    float baseline_y = y + cap_h;
+
+    const char *p = str;
+    while (*p) {
+        int ch = next_glyph_code(&p);
+        const gs_glyph_metric_t *m = &gs_glyph_metrics[ch];
+        if (m->w > 0 && m->h > 0) {
+            const uint8_t *bmp = &g_atlas_raw[m->data_offset];
+            float gx0 = pen_x + m->xoff * scale;
+            float gy0 = baseline_y + m->yoff * scale;
+            float gw_f = m->w * scale;
+            float gh_f = m->h * scale;
+
+            int ix0 = (int)floorf(gx0 - 1.0f);
+            int iy0 = (int)floorf(gy0 - 1.0f);
+            int ix1 = (int)ceilf(gx0 + gw_f + 1.0f);
+            int iy1 = (int)ceilf(gy0 + gh_f + 1.0f);
+
+            for (int py = iy0; py <= iy1; py++) {
+                for (int px = ix0; px <= ix1; px++) {
+                    /* 2x2 supersampled bilinear filter for ultra-crisp downscaling */
+                    float u0 = ((px + 0.25f) - gx0) / scale - 0.5f;
+                    float u1 = ((px + 0.75f) - gx0) / scale - 0.5f;
+                    float v0 = ((py + 0.25f) - gy0) / scale - 0.5f;
+                    float v1 = ((py + 0.75f) - gy0) / scale - 0.5f;
+
+                    float a = 0.25f * (
+                        sample_glyph_bilinear(bmp, m->w, m->h, u0, v0) +
+                        sample_glyph_bilinear(bmp, m->w, m->h, u1, v0) +
+                        sample_glyph_bilinear(bmp, m->w, m->h, u0, v1) +
+                        sample_glyph_bilinear(bmp, m->w, m->h, u1, v1)
+                    );
+                    if (a > 1.0f) {
+                        color_t gc = col;
+                        gc.a = (uint8_t)((col.a * a) / 255.0f);
+                        blend_pixel(cv, px, py, gc);
+                    }
+                }
+            }
+        }
+        pen_x += m->advance * scale + tracking;
+    }
+}
+
+/* Convert legacy ALL-CAPS scanner strings into authentic Googlebook OS mixed-case UI labels */
+static void prettify_label(const char *in, char *out, size_t out_sz, bool is_subtitle) {
+    if (!in || !*in) {
+        out[0] = '\0';
+        return;
+    }
+    if (strcasecmp(in, "FEDOMAKASE LINUX") == 0) {
+        snprintf(out, out_sz, "Fedomakase Linux");
+        return;
+    }
+    if (strcasecmp(in, "ANDROID 17") == 0) {
+        snprintf(out, out_sz, "Android 17");
+        return;
+    }
+    if (strcasecmp(in, "WINDOWS 11") == 0) {
+        snprintf(out, out_sz, "Windows 11");
+        return;
+    }
+    if (strcasecmp(in, "LIVE USB / ISO") == 0) {
+        snprintf(out, out_sz, "Live USB / ISO");
+        return;
+    }
+    if (strcasecmp(in, "FEDORA 44 - OMARCHY HYPRLAND") == 0) {
+        snprintf(out, out_sz, "Fedora 44 • Omarchy Hyprland");
+        return;
+    }
+    if (strcasecmp(in, "ALUMINUM OS - SLOT A (ONE-SHOT)") == 0) {
+        snprintf(out, out_sz, "Aluminum OS • Slot A (One-Shot)");
+        return;
+    }
+    if (strcasecmp(in, "UEFI BRIDGE -> BOOTMGFW.EFI") == 0) {
+        snprintf(out, out_sz, "UEFI Bridge • bootmgfw.efi");
+        return;
+    }
+    if (strcasecmp(in, "SCAN & KEXEC EXTERNAL USB") == 0) {
+        snprintf(out, out_sz, "External USB • Live ISO");
+        return;
+    }
+
+    /* Check if string has any lowercase letters already */
+    bool has_lower = false;
+    for (const char *p = in; *p; p++) {
+        if (*p >= 'a' && *p <= 'z') { has_lower = true; break; }
+    }
+    if (has_lower) {
+        snprintf(out, out_sz, "%s", in);
+        return;
+    }
+
+    /* Smart Title-Case conversion for dynamic scanner strings (e.g. "KERNEL 6.19.6 - DIRECT BOOT") */
+    size_t j = 0;
+    bool new_word = true;
+    for (size_t i = 0; in[i] && j + 4 < out_sz; i++) {
+        if (in[i] == ' ' && in[i + 1] == '-' && in[i + 2] == ' ') {
+            out[j++] = ' ';
+            out[j++] = '\xE2';
+            out[j++] = '\x80';
+            out[j++] = '\xA2';
+            out[j++] = ' ';
+            i += 2;
+            new_word = true;
+            continue;
+        }
+        unsigned char c = (unsigned char)in[i];
+        if (isalpha(c)) {
+            /* Keep known short acronyms uppercase */
+            if (new_word && (strncmp(&in[i], "OS", 2) == 0 || strncmp(&in[i], "USB", 3) == 0 ||
+                             strncmp(&in[i], "ISO", 3) == 0 || strncmp(&in[i], "EFI", 3) == 0 ||
+                             strncmp(&in[i], "UEFI", 4) == 0 || strncmp(&in[i], "LUKS", 4) == 0)) {
+                while (isalpha((unsigned char)in[i]) && j + 1 < out_sz) {
+                    out[j++] = in[i++];
+                }
+                i--;
+                new_word = false;
+                continue;
+            }
+            out[j++] = new_word ? (char)toupper(c) : (char)tolower(c);
+            new_word = false;
+        } else {
+            out[j++] = (char)c;
+            new_word = (c == ' ' || c == '/' || c == '(' || c == ':');
+        }
+    }
+    out[j] = '\0';
+    (void)is_subtitle;
+}
+
+/*
+ * Authentic 4-Color Google "G" Emblem rendered via Signed Distance Fields:
+ *   Blue (#4285F4), Red (#EA4335), Yellow (#FBBC05), Green (#34A853)
+ */
+static void draw_google_g_logo(canvas_t *cv, float cx, float cy, float outer_r) {
+    color_t c_blue   = parse_hex("#4285F4", 255);
+    color_t c_red    = parse_hex("#EA4335", 255);
+    color_t c_yellow = parse_hex("#FBBC05", 255);
+    color_t c_green  = parse_hex("#34A853", 255);
+
+    float stroke = outer_r * 0.38f;
+    float mid_r  = outer_r - stroke * 0.5f;
+    float half_s = stroke * 0.5f;
+
+    int x0 = (int)(cx - outer_r - 3);
+    int y0 = (int)(cy - outer_r - 3);
+    int x1 = (int)(cx + outer_r + 3);
+    int y1 = (int)(cy + outer_r + 3);
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 >= cv->width) x1 = cv->width - 1;
+    if (y1 >= cv->height) y1 = cv->height - 1;
+
+    for (int py = y0; py <= y1; py++) {
+        for (int px = x0; px <= x1; px++) {
+            float dx = (px + 0.5f) - cx;
+            float dy = (py + 0.5f) - cy;
+            float r  = sqrtf(dx * dx + dy * dy);
+            float deg = atan2f(dy, dx) * (180.0f / (float)M_PI);
+
+            /* Horizontal crossbar of the Google 'G' */
+            float bar_dx = fabsf(dx - outer_r * 0.46f) - outer_r * 0.52f;
+            float bar_dy = fabsf(dy) - half_s * 0.92f;
+            float bar_d  = (bar_dx > bar_dy ? bar_dx : bar_dy);
+
+            /* Ring distance */
+            float ring_d = fabsf(r - mid_r) - half_s;
+
+            /* Upper-right opening gap (-42 deg to -2 deg) */
+            if (deg > -42.0f && deg < -2.0f && bar_d > 0.5f) {
+                continue;
+            }
+
+            float d = ring_d;
+            color_t col = c_blue;
+            if (bar_d < ring_d && dx >= -half_s * 0.2f && r <= outer_r + 0.5f) {
+                d = bar_d;
+                col = c_blue;
+            } else {
+                if (deg >= -2.0f && deg < 48.0f) col = c_blue;
+                else if (deg >= 48.0f && deg < 142.0f) col = c_green;
+                else if (deg >= 142.0f || deg < -142.0f) col = c_yellow;
+                else col = c_red;
+            }
+
+            if (d < 0.5f) {
+                float cov = 0.5f - d;
+                if (cov > 1.0f) cov = 1.0f;
+                col.a = (uint8_t)(255.0f * cov);
+                blend_pixel(cv, px, py, col);
+            }
+        }
+    }
+}
+
+/* 4-Color Googlebook accent pill bar below header */
+static void draw_google_four_color_bar(canvas_t *cv, float cx, float cy, float sf) {
+    color_t cols[4] = {
+        parse_hex("#4285F4", 255),
+        parse_hex("#EA4335", 255),
+        parse_hex("#FBBC05", 255),
+        parse_hex("#34A853", 255)
+    };
+    color_t none = {0, 0, 0, 0};
+    float seg_w = 34.0f * sf;
+    float seg_h = 6.0f * sf;
+    float gap   = 10.0f * sf;
+    float total = 4 * seg_w + 3 * gap;
+    float sx    = cx - total * 0.5f;
+    for (int i = 0; i < 4; i++) {
+        draw_sdf_rounded_rect(cv, sx + i * (seg_w + gap), cy - seg_h * 0.5f,
+                              seg_w, seg_h, seg_h * 0.5f, cols[i], none, 0);
+    }
+}
+
+/* Vector padlock icon for LUKS2 chip & modal header */
+static void draw_lock_icon(canvas_t *cv, float cx, float cy, float size, color_t col, color_t bg_hole) {
+    color_t none = {0, 0, 0, 0};
+    float bw = size * 0.76f;
+    float bh = size * 0.58f;
+    float bx = cx - bw * 0.5f;
+    float by = cy - bh * 0.12f;
+    float sh_r = size * 0.25f;
+    float sh_w = size * 0.11f;
+    if (sh_w < 1.8f) sh_w = 1.8f;
+
+    /* Shackle loop */
+    draw_sdf_rounded_rect(cv, cx - sh_r, cy - size * 0.48f, sh_r * 2.0f, size * 0.52f,
+                          sh_r, none, col, sh_w);
+    /* Lock body */
+    draw_sdf_rounded_rect(cv, bx, by, bw, bh, size * 0.15f, col, none, 0);
+    /* Keyhole */
+    draw_sdf_circle(cv, cx, by + bh * 0.46f, size * 0.085f, bg_hole, none, 0);
+}
+
 static void draw_os_badge(canvas_t *cv, const char *os_type, float cx, float cy, float radius) {
-    float sf = radius / 88.0f;
-    color_t ring = parse_hex("#38BDF8", 235);
+    float sf = radius / 84.0f;
+    color_t ring = parse_hex("#8AB4F8", 255);
     color_t none = {0, 0, 0, 0};
 
-    if (strcmp(os_type, "omarchy") == 0)      ring = parse_hex("#38BDF8", 235);
-    else if (strcmp(os_type, "fedora") == 0)  ring = parse_hex("#3B82F6", 235);
-    else if (strcmp(os_type, "arch") == 0)    ring = parse_hex("#06B6D4", 235);
-    else if (strcmp(os_type, "ubuntu") == 0)  ring = parse_hex("#F97316", 235);
-    else if (strcmp(os_type, "android") == 0) ring = parse_hex("#34D399", 235);
-    else if (strcmp(os_type, "windows") == 0) ring = parse_hex("#60A5FA", 235);
-    else if (strcmp(os_type, "usb") == 0)     ring = parse_hex("#A78BFA", 235);
+    if (strcmp(os_type, "omarchy") == 0)      ring = parse_hex("#8AB4F8", 255); /* Google Blue */
+    else if (strcmp(os_type, "fedora") == 0)  ring = parse_hex("#669DF6", 255);
+    else if (strcmp(os_type, "arch") == 0)    ring = parse_hex("#78D9EC", 255);
+    else if (strcmp(os_type, "ubuntu") == 0)  ring = parse_hex("#FCAD70", 255);
+    else if (strcmp(os_type, "android") == 0) ring = parse_hex("#81C995", 255); /* Google Green */
+    else if (strcmp(os_type, "windows") == 0) ring = parse_hex("#4285F4", 255);
+    else if (strcmp(os_type, "usb") == 0)     ring = parse_hex("#FDD663", 255); /* Google Yellow */
 
     color_t fill = ring;
-    fill.a = 38;
-    float rw = 4.0f * sf; if (rw < 1.5f) rw = 1.5f;
-    draw_sdf_circle(cv, cx, cy, radius, fill, ring, rw);
+    fill.a = 30;
+    color_t ring_border = ring;
+    ring_border.a = 90;
+    float rw = 2.5f * sf; if (rw < 1.5f) rw = 1.5f;
+    draw_sdf_circle(cv, cx, cy, radius, fill, ring_border, rw);
 
     if (strcmp(os_type, "windows") == 0) {
         /* 4-pane Windows 11 vector grid */
-        float s = radius * 0.42f;
+        float s = radius * 0.38f;
         float g = 6.0f * sf;
-        draw_sdf_rounded_rect(cv, cx - s - g/2, cy - s - g/2, s, s, 6.0f * sf, ring, none, 0);
-        draw_sdf_rounded_rect(cv, cx + g/2,     cy - s - g/2, s, s, 6.0f * sf, ring, none, 0);
-        draw_sdf_rounded_rect(cv, cx - s - g/2, cy + g/2,     s, s, 6.0f * sf, ring, none, 0);
-        draw_sdf_rounded_rect(cv, cx + g/2,     cy + g/2,     s, s, 6.0f * sf, ring, none, 0);
+        draw_sdf_rounded_rect(cv, cx - s - g/2, cy - s - g/2, s, s, 5.0f * sf, ring, none, 0);
+        draw_sdf_rounded_rect(cv, cx + g/2,     cy - s - g/2, s, s, 5.0f * sf, ring, none, 0);
+        draw_sdf_rounded_rect(cv, cx - s - g/2, cy + g/2,     s, s, 5.0f * sf, ring, none, 0);
+        draw_sdf_rounded_rect(cv, cx + g/2,     cy + g/2,     s, s, 5.0f * sf, ring, none, 0);
     } else if (strcmp(os_type, "omarchy") == 0 || strcmp(os_type, "fedora") == 0 || strcmp(os_type, "arch") == 0) {
-        /* Terminal / Hyprland tiling window vector icon */
-        float w = radius * 0.92f, h = radius * 0.72f;
+        /* Hyprland / Omarchy tiling desktop layout + terminal chevron */
+        float w = radius * 0.88f, h = radius * 0.68f;
         draw_sdf_rounded_rect(cv, cx - w/2, cy - h/2, w * 0.54f, h, 8.0f * sf, ring, none, 0);
-        draw_sdf_rounded_rect(cv, cx + w * 0.08f, cy - h/2, w * 0.42f, h * 0.46f, 6.0f * sf, ring, none, 0);
-        draw_sdf_rounded_rect(cv, cx + w * 0.08f, cy + h * 0.04f, w * 0.42f, h * 0.46f, 6.0f * sf, ring, none, 0);
+        color_t sub_pane = ring; sub_pane.a = 175;
+        draw_sdf_rounded_rect(cv, cx + w * 0.08f, cy - h/2, w * 0.42f, h * 0.45f, 7.0f * sf, sub_pane, none, 0);
+        draw_sdf_rounded_rect(cv, cx + w * 0.08f, cy + h * 0.05f, w * 0.42f, h * 0.45f, 7.0f * sf, sub_pane, none, 0);
+        /* Terminal prompt '>' inside primary pane */
+        color_t dark = parse_hex("#202124", 240);
+        float px = cx - w * 0.32f, py = cy;
+        draw_sdf_segment(cv, px - 6.0f * sf, py - 8.0f * sf, px + 3.0f * sf, py, 2.2f * sf, dark);
+        draw_sdf_segment(cv, px + 3.0f * sf, py, px - 6.0f * sf, py + 8.0f * sf, 2.2f * sf, dark);
     } else if (strcmp(os_type, "android") == 0) {
-        int ts = (int)roundf(4.0f * sf); if (ts < 2) ts = 2;
-        draw_text(cv, "A17", (int)cx, (int)(cy - 4 * ts), ts, 1, ring);
+        /* Authentic Android robot head vector icon (dome + antennae + eyes) */
+        float hr = radius * 0.44f;
+        float hy = cy + radius * 0.16f;
+        /* Antennae */
+        draw_sdf_segment(cv, cx - hr * 0.45f, hy - hr * 0.65f, cx - hr * 0.78f, hy - hr * 1.15f, 3.0f * sf, ring);
+        draw_sdf_segment(cv, cx + hr * 0.45f, hy - hr * 0.65f, cx + hr * 0.78f, hy - hr * 1.15f, 3.0f * sf, ring);
+        /* Semicircle dome head */
+        int x0 = (int)(cx - hr - 2), x1 = (int)(cx + hr + 2);
+        int y0 = (int)(hy - hr - 2), y1 = (int)(hy + 4 * sf);
+        for (int py = y0; py <= y1; py++) {
+            for (int px = x0; px <= x1; px++) {
+                float dx = (px + 0.5f) - cx;
+                float dy = (py + 0.5f) - hy;
+                float dc = sqrtf(dx * dx + dy * dy) - hr;
+                float d = (dy > 0.0f) ? (dc > dy ? dc : dy) : dc;
+                if (d < 0.5f) {
+                    float cov = 0.5f - d; if (cov > 1.0f) cov = 1.0f;
+                    color_t c = ring; c.a = (uint8_t)(ring.a * cov);
+                    blend_pixel(cv, px, py, c);
+                }
+            }
+        }
+        /* Eyes */
+        color_t eye = parse_hex("#202124", 255);
+        draw_sdf_circle(cv, cx - hr * 0.42f, hy - hr * 0.42f, 4.2f * sf, eye, none, 0);
+        draw_sdf_circle(cv, cx + hr * 0.42f, hy - hr * 0.42f, 4.2f * sf, eye, none, 0);
     } else if (strcmp(os_type, "usb") == 0) {
-        float uw = radius * 0.52f, uh = radius * 0.74f;
-        draw_sdf_rounded_rect(cv, cx - uw/2, cy - uh * 0.25f, uw, uh * 0.75f, 8.0f * sf, ring, none, 0);
+        float uw = radius * 0.48f, uh = radius * 0.72f;
+        draw_sdf_rounded_rect(cv, cx - uw/2, cy - uh * 0.22f, uw, uh * 0.74f, 8.0f * sf, ring, none, 0);
         color_t plug = ring; plug.a = 160;
-        draw_sdf_rounded_rect(cv, cx - uw * 0.34f, cy - uh * 0.62f, uw * 0.68f, uh * 0.36f, 4.0f * sf, plug, ring, 2.0f * sf);
+        draw_sdf_rounded_rect(cv, cx - uw * 0.34f, cy - uh * 0.58f, uw * 0.68f, uh * 0.34f, 4.0f * sf, plug, ring, 2.0f * sf);
     } else {
-        int ts = (int)roundf(4.0f * sf); if (ts < 2) ts = 2;
-        draw_text(cv, "OS", (int)cx, (int)(cy - 4 * ts), ts, 1, ring);
+        draw_text_gs(cv, "OS", cx, cy - 16.0f * sf, 32.0f * sf, 1, ring, 0.5f);
     }
 }
 
@@ -472,17 +772,13 @@ static void render_ui(canvas_t *cv, const theme_config_t *t,
     int cgap_i = (int)(t->card_gap * sf);
     float crad = t->card_radius * sf;
 
-    int s_title = (int)roundf(5.0f * sf); if (s_title < 2) s_title = 2;
-    int s_card  = (int)roundf(3.0f * sf); if (s_card < 1)  s_card  = 1;
-    int s_sub   = (int)roundf(2.0f * sf); if (s_sub < 1)   s_sub   = 1;
-
     int total_w = count * cw_i + (count - 1) * cgap_i;
     int start_x = (w - total_w) / 2;
     float sel_cx = start_x + selected * (cw_i + cgap_i) + cw_i * 0.5f;
-    float sel_cy = h * 0.50f;
-    float glow_r = 420.0f * sf;
+    float sel_cy = h * 0.51f;
+    float glow_r = 460.0f * sf;
 
-    /* 1. Smooth linear background gradient + radial glow behind selected card */
+    /* 1. Native Googlebook OS Material 3 Dark surface (#202124) with subtle ambient glow */
     for (int y = 0; y < h; y++) {
         float fy = (float)y / (float)(h - 1);
         float br = t->bg_top.r + (t->bg_bot.r - t->bg_top.r) * fy;
@@ -493,7 +789,7 @@ static void render_ui(canvas_t *cv, const theme_config_t *t,
         for (int x = 0; x < w; x++) {
             float dx = x - sel_cx;
             float dist2 = dx * dx + dy * dy;
-            float glow = expf(-dist2 / (2.0f * glow_r * glow_r)) * 0.22f;
+            float glow = expf(-dist2 / (2.0f * glow_r * glow_r)) * 0.08f;
             int r = (int)(br + t->accent.r * glow);
             int g = (int)(bg + t->accent.g * glow);
             int b = (int)(bb + t->accent.b * glow);
@@ -504,65 +800,115 @@ static void render_ui(canvas_t *cv, const theme_config_t *t,
         }
     }
 
-    /* 2. Header Title & Subtitle */
-    draw_text(cv, t->title, w / 2, (int)(h * 0.11f), s_title, 1, t->text);
-    draw_text(cv, t->subtitle, w / 2, (int)(h * 0.165f), s_sub, 1, t->subtext);
+    /* 2. Googlebook OS Splash Header: 4-Color Google 'G' Emblem + "Googlebook" Wordmark */
+    const char *brand_title = (strstr(t->title, "//") != NULL) ? "Googlebook" : t->title;
+    const char *brand_sub   = (strstr(t->subtitle, "COREBOOT") != NULL)
+                              ? "Select an operating system to start" : t->subtitle;
 
-    /* 3. OS Boot Cards */
-    int card_y = (h - ch_i) / 2 + (int)(24 * sf);
+    float title_px = 68.0f * sf;
+    float sub_px   = 28.0f * sf;
+    float logo_r   = 29.0f * sf;
+    float title_w  = measure_text_gs(brand_title, title_px, 0.5f * sf);
+    float header_gap = 22.0f * sf;
+    float group_w  = (logo_r * 2.0f) + header_gap + title_w;
+    float group_x  = (w - group_w) * 0.5f;
+    float header_y = h * 0.115f;
+
+    draw_google_g_logo(cv, group_x + logo_r, header_y + 24.0f * sf, logo_r);
+    draw_text_gs(cv, brand_title, group_x + logo_r * 2.0f + header_gap, header_y,
+                 title_px, 0, t->text, 0.5f * sf);
+
+    draw_google_four_color_bar(cv, w * 0.5f, h * 0.175f, sf);
+    draw_text_gs(cv, brand_sub, w * 0.5f, h * 0.205f, sub_px, 1, t->subtext, 0.2f * sf);
+
+    /* 3. Material 3 OS Selector Surface Cards */
+    int card_y = (h - ch_i) / 2 + (int)(44 * sf);
+    color_t none = {0, 0, 0, 0};
+    color_t outline_subtle = parse_hex("#3C4043", 255);
+    color_t dark_text = parse_hex("#202124", 255);
+
     for (int i = 0; i < count; i++) {
         bool is_sel = (i == selected);
         float x = (float)(start_x + i * (cw_i + cgap_i));
-        float y = (float)(is_sel ? (card_y - (int)(22 * sf)) : card_y);
+        float y = (float)(is_sel ? (card_y - (int)(16 * sf)) : card_y);
         float cw = (float)cw_i;
         float ch = (float)ch_i;
 
-        color_t border = is_sel ? t->accent : (color_t){255, 255, 255, 32};
-        float bw = is_sel ? (4.5f * sf) : (2.0f * sf);
-        if (bw < 1.5f) bw = 1.5f;
+        /* Soft Material elevation shadow */
+        draw_soft_shadow(cv, x, y + (is_sel ? 14.0f * sf : 6.0f * sf), cw, ch, crad,
+                         is_sel ? 32.0f * sf : 16.0f * sf, is_sel ? 110 : 60);
+
+        color_t border = is_sel ? t->accent : outline_subtle;
+        float bw = is_sel ? (3.5f * sf) : (1.5f * sf);
+        if (bw < 1.2f) bw = 1.2f;
         draw_sdf_rounded_rect(cv, x, y, cw, ch, crad,
                               is_sel ? t->card_sel_bg : t->card_bg, border, bw);
 
-        /* Index badge [1..N] */
+        /* Shortcut key pill [1..N] in top-left */
         char idx_s[16];
-        snprintf(idx_s, sizeof(idx_s), "[%d]", i + 1);
-        draw_text(cv, idx_s, (int)(x + 34 * sf), (int)(y + 34 * sf), s_sub, 0,
-                  is_sel ? t->accent : t->subtext);
+        snprintf(idx_s, sizeof(idx_s), "%d", i + 1);
+        float k_rad = 18.0f * sf;
+        color_t k_bg = is_sel ? (color_t){t->accent.r, t->accent.g, t->accent.b, 38} : parse_hex("#202124", 180);
+        color_t k_bd = is_sel ? t->accent : outline_subtle;
+        draw_sdf_circle(cv, x + 44.0f * sf, y + 44.0f * sf, k_rad, k_bg, k_bd, 1.5f * sf);
+        draw_text_gs(cv, idx_s, x + 44.0f * sf, y + 35.0f * sf, 24.0f * sf, 1,
+                     is_sel ? t->accent : t->subtext, 0.0f);
 
+        /* Encrypted LUKS2 badge in top-right */
         if (entries[i].needs_luks) {
-            draw_text(cv, "LUKS2", (int)(x + cw - 34 * sf), (int)(y + 34 * sf), s_sub, 2, t->accent);
+            float lw = 128.0f * sf, lh = 36.0f * sf;
+            float lx = x + cw - lw - 28.0f * sf;
+            float ly = y + 26.0f * sf;
+            color_t l_bg = {t->accent.r, t->accent.g, t->accent.b, 28};
+            color_t l_bd = {t->accent.r, t->accent.g, t->accent.b, 96};
+            draw_sdf_rounded_rect(cv, lx, ly, lw, lh, lh * 0.5f, l_bg, l_bd, 1.2f * sf);
+            draw_lock_icon(cv, lx + 24.0f * sf, ly + lh * 0.5f, 18.0f * sf, t->accent,
+                           is_sel ? t->card_sel_bg : t->card_bg);
+            draw_text_gs(cv, "LUKS2", lx + 42.0f * sf, ly + 10.5f * sf, 20.0f * sf, 0, t->accent, 0.4f * sf);
         }
 
-        /* Vector OS Badge */
-        draw_os_badge(cv, entries[i].os_type, x + cw * 0.5f, y + ch * 0.35f, 88.0f * sf);
+        /* Vector OS Icon Badge */
+        draw_os_badge(cv, entries[i].os_type, x + cw * 0.5f, y + ch * 0.34f, 84.0f * sf);
 
-        /* Title & Subtitle */
-        draw_text(cv, entries[i].title, (int)(x + cw * 0.5f), (int)(y + ch * 0.63f), s_card, 1, t->text);
-        draw_text(cv, entries[i].subtitle, (int)(x + cw * 0.5f), (int)(y + ch * 0.72f), s_sub, 1, t->subtext);
+        /* Formatted Mixed-Case Card Title & Subtitle */
+        char disp_title[128], disp_sub[128];
+        prettify_label(entries[i].title, disp_title, sizeof(disp_title), false);
+        prettify_label(entries[i].subtitle, disp_sub, sizeof(disp_sub), true);
 
+        draw_text_gs(cv, disp_title, x + cw * 0.5f, y + ch * 0.59f, 36.0f * sf, 1, t->text, 0.2f * sf);
+        draw_text_gs(cv, disp_sub,   x + cw * 0.5f, y + ch * 0.685f, 23.0f * sf, 1, t->subtext, 0.1f * sf);
+
+        /* Bottom Material 3 Pill Action Button */
         if (is_sel) {
-            float pw = 280.0f * sf, ph = 56.0f * sf;
+            float pw = 220.0f * sf, ph = 56.0f * sf;
             float px = x + (cw - pw) * 0.5f;
-            float py = y + ch - 92.0f * sf;
-            color_t pill_fill = t->accent;
-            pill_fill.a = 48;
-            draw_sdf_rounded_rect(cv, px, py, pw, ph, 28.0f * sf, pill_fill, t->accent, 2.5f * sf);
-            draw_text(cv, "ENTER TO BOOT", (int)(x + cw * 0.5f), (int)(py + 20.0f * sf), s_sub, 1, t->text);
+            float py = y + ch - 88.0f * sf;
+            draw_sdf_rounded_rect(cv, px, py, pw, ph, ph * 0.5f, t->accent, none, 0);
+            draw_text_gs(cv, "Boot", x + cw * 0.5f, py + 18.0f * sf, 26.0f * sf, 1, dark_text, 0.3f * sf);
+        } else {
+            float pw = 180.0f * sf, ph = 50.0f * sf;
+            float px = x + (cw - pw) * 0.5f;
+            float py = y + ch - 85.0f * sf;
+            draw_sdf_rounded_rect(cv, px, py, pw, ph, ph * 0.5f, none, outline_subtle, 1.5f * sf);
+            draw_text_gs(cv, "Select", x + cw * 0.5f, py + 16.0f * sf, 23.0f * sf, 1, t->subtext, 0.2f * sf);
         }
     }
 
-    /* 4. Footer & Countdown Bar */
-    const char *footer = "LEFT/RIGHT: SELECT OS    -    ENTER: BOOT    -    R: RESCAN USB/NVME    -    ESC: SHELL";
-    draw_text(cv, (status_msg && status_msg[0]) ? status_msg : footer,
-              w / 2, (int)(h * 0.88f), s_sub, 1, t->subtext);
+    /* 4. Footer Navigation Hint & Material Linear Progress Bar */
+    const char *footer = "Arrow keys: Select OS   •   Enter: Boot   •   R: Rescan USB   •   Esc: Recovery shell";
+    char disp_status[256];
+    if (status_msg && status_msg[0]) {
+        prettify_label(status_msg, disp_status, sizeof(disp_status), true);
+    }
+    draw_text_gs(cv, (status_msg && status_msg[0]) ? disp_status : footer,
+                 w * 0.5f, h * 0.885f, 23.0f * sf, 1, t->subtext, 0.2f * sf);
 
     if (timer_active && t->timeout_sec > 0) {
-        float bw = 640.0f * sf, bh = 10.0f * sf;
+        float bw = 560.0f * sf, bh = 8.0f * sf;
         if (bh < 4.0f) bh = 4.0f;
         float bx = (w - bw) * 0.5f;
-        float by = h * 0.92f;
-        color_t track = {255, 255, 255, 36};
-        color_t none  = {0, 0, 0, 0};
+        float by = h * 0.925f;
+        color_t track = parse_hex("#3C4043", 255);
         draw_sdf_rounded_rect(cv, bx, by, bw, bh, bh * 0.5f, track, none, 0);
         float frac = (float)remaining_sec / (float)t->timeout_sec;
         if (frac < 0.0f) frac = 0.0f;
@@ -570,38 +916,95 @@ static void render_ui(canvas_t *cv, const theme_config_t *t,
         draw_sdf_rounded_rect(cv, bx, by, bw * frac, bh, bh * 0.5f, t->accent, none, 0);
     }
 
-    /* 5. LUKS2 Passphrase Modal Overlay */
+    /* 5. Authentic ChromeOS / Googlebook OS LUKS2 Passphrase Modal Dialog */
     if (luks_modal) {
-        color_t dim = {5, 8, 16, 205};
+        color_t scrim = {14, 15, 18, 200};
         for (int y = 0; y < h; y++)
             for (int x = 0; x < w; x++)
-                blend_pixel(cv, x, y, dim);
+                blend_pixel(cv, x, y, scrim);
 
-        float mw = 960.0f * sf, mh = 420.0f * sf;
+        float mw = 880.0f * sf, mh = 490.0f * sf;
         float mx = (w - mw) * 0.5f;
         float my = (h - mh) * 0.5f;
-        draw_sdf_rounded_rect(cv, mx, my, mw, mh, 32.0f * sf, t->card_sel_bg, t->accent, 4.0f * sf);
+        float mrad = 28.0f * sf;
 
-        draw_text(cv, "UNLOCK ENCRYPTED ROOT (LUKS2)", w / 2, (int)(my + 58 * sf), s_card, 1, t->text);
-        draw_text(cv, entries[selected].luks_dev, w / 2, (int)(my + 114 * sf), s_sub, 1, t->subtext);
+        draw_soft_shadow(cv, mx, my + 18.0f * sf, mw, mh, mrad, 42.0f * sf, 150);
+        color_t modal_surface = parse_hex("#292A2D", 255);
+        color_t modal_border  = parse_hex("#3C4043", 255);
+        draw_sdf_rounded_rect(cv, mx, my, mw, mh, mrad, modal_surface, modal_border, 1.5f * sf);
 
-        float ibw = mw - 140.0f * sf, ibh = 84.0f * sf;
-        float ibx = mx + 70.0f * sf, iby = my + 180.0f * sf;
-        color_t box_bg = {8, 12, 22, 245};
-        draw_sdf_rounded_rect(cv, ibx, iby, ibw, ibh, 18.0f * sf, box_bg, t->accent, 2.5f * sf);
+        /* Top circular lock icon badge */
+        float lock_cy = my + 68.0f * sf;
+        color_t lock_bg = {t->accent.r, t->accent.g, t->accent.b, 32};
+        draw_sdf_circle(cv, w * 0.5f, lock_cy, 34.0f * sf, lock_bg, none, 0);
+        draw_lock_icon(cv, w * 0.5f, lock_cy, 32.0f * sf, t->accent, modal_surface);
+
+        /* Modal Title & Subtitle */
+        draw_text_gs(cv, "Enter your passphrase", w * 0.5f, my + 122.0f * sf, 38.0f * sf, 1, t->text, 0.2f * sf);
+
+        char modal_sub[256];
+        const char *ldev = (entries[selected].luks_dev[0]) ? entries[selected].luks_dev : "/dev/nvme0n1p32";
+        snprintf(modal_sub, sizeof(modal_sub), "Unlock encrypted disk (%.120s) to start Fedomakase Linux", ldev);
+        draw_text_gs(cv, modal_sub, w * 0.5f, my + 174.0f * sf, 23.0f * sf, 1, t->subtext, 0.1f * sf);
+
+        /* Material Outlined Password Input Field */
+        float ibw = mw - 128.0f * sf, ibh = 82.0f * sf;
+        float ibx = mx + 64.0f * sf, iby = my + 228.0f * sf;
+        color_t field_bg = parse_hex("#202124", 255);
+        draw_sdf_rounded_rect(cv, ibx, iby, ibw, ibh, 14.0f * sf, field_bg, t->accent, 2.5f * sf);
+
+        /* Floating Material Field Label "Passphrase" on top outline */
+        float lbl_w = measure_text_gs("Passphrase", 19.0f * sf, 0.2f * sf) + 20.0f * sf;
+        draw_sdf_rounded_rect(cv, ibx + 20.0f * sf, iby - 10.0f * sf, lbl_w, 20.0f * sf, 4.0f * sf, modal_surface, none, 0);
+        draw_text_gs(cv, "Passphrase", ibx + 30.0f * sf, iby - 7.0f * sf, 19.0f * sf, 0, t->accent, 0.2f * sf);
 
         size_t plen = luks_pass ? strlen(luks_pass) : 0;
         if (plen == 0) {
-            draw_text(cv, "TYPE PASSPHRASE AND PRESS ENTER...", (int)(ibx + 28 * sf), (int)(iby + 34 * sf), s_sub, 0, t->subtext);
+            draw_text_gs(cv, "Enter LUKS2 passphrase...", ibx + 28.0f * sf, iby + 30.0f * sf, 25.0f * sf, 0, t->subtext, 0.1f * sf);
         } else {
-            char mask[128] = {0};
-            for (size_t k = 0; k < plen && k < 36; k++) strcat(mask, "* ");
-            draw_text(cv, mask, (int)(ibx + 28 * sf), (int)(iby + 30 * sf), s_card, 0, t->accent);
+            /* Render bullet '•' (glyph 127) password mask + active cursor */
+            char mask[256] = {0};
+            for (size_t k = 0; k < plen && k < 36; k++) {
+                strcat(mask, "\xE2\x80\xA2");
+            }
+            float mask_x = ibx + 28.0f * sf;
+            float mask_y = iby + 26.0f * sf;
+            draw_text_gs(cv, mask, mask_x, mask_y, 34.0f * sf, 0, t->text, 6.0f * sf);
+            float mw_px = measure_text_gs(mask, 34.0f * sf, 6.0f * sf);
+            draw_sdf_rounded_rect(cv, mask_x + mw_px + 8.0f * sf, iby + 20.0f * sf,
+                                  3.0f * sf, 42.0f * sf, 1.5f * sf, t->accent, none, 0);
         }
 
-        const char *mfooter = (status_msg && status_msg[0]) ? status_msg : "ENTER: UNLOCK & BOOT    -    ESC: CANCEL";
-        draw_text(cv, mfooter, w / 2, (int)(my + mh - 64 * sf), s_sub, 1,
-                  (status_msg && status_msg[0]) ? t->accent : t->subtext);
+        /* Bottom Action Row: Status hint on left + "Cancel" & "Unlock" pills on right */
+        float btn_y = my + mh - 96.0f * sf;
+        float btn_h = 52.0f * sf;
+        float unlock_w = 152.0f * sf;
+        float cancel_w = 152.0f * sf;
+        float unlock_x = mx + mw - 64.0f * sf - unlock_w;
+        float cancel_x = unlock_x - 18.0f * sf - cancel_w;
+
+        if (status_msg && status_msg[0]) {
+            char mstat[256];
+            prettify_label(status_msg, mstat, sizeof(mstat), true);
+            color_t err_col = (strstr(status_msg, "INCORRECT") != NULL)
+                              ? parse_hex("#F28B82", 255) : t->accent;
+            draw_text_gs(cv, mstat, mx + 64.0f * sf, btn_y + 17.0f * sf, 22.0f * sf, 0, err_col, 0.1f * sf);
+        } else {
+            draw_text_gs(cv, "Esc to cancel   •   Enter to unlock", mx + 64.0f * sf, btn_y + 17.0f * sf,
+                         22.0f * sf, 0, t->subtext, 0.1f * sf);
+        }
+
+        /* "Cancel" Outlined Material Pill */
+        draw_sdf_rounded_rect(cv, cancel_x, btn_y, cancel_w, btn_h, btn_h * 0.5f,
+                              none, modal_border, 1.5f * sf);
+        draw_text_gs(cv, "Cancel", cancel_x + cancel_w * 0.5f, btn_y + 17.0f * sf,
+                     24.0f * sf, 1, t->accent, 0.2f * sf);
+
+        /* "Unlock" Filled Material Pill */
+        draw_sdf_rounded_rect(cv, unlock_x, btn_y, unlock_w, btn_h, btn_h * 0.5f,
+                              t->accent, none, 0);
+        draw_text_gs(cv, "Unlock", unlock_x + unlock_w * 0.5f, btn_y + 17.0f * sf,
+                     24.0f * sf, 1, dark_text, 0.2f * sf);
     }
 }
 
@@ -646,7 +1049,6 @@ static void utf16le_to_ascii(const uint16_t *in, char *out, size_t max_len) {
 }
 
 static int gpt_switch_slot(const char *disk_path, const char *mode, bool do_reboot) {
-    (void)do_reboot;
     int flags = (strcmp(mode, "status") == 0) ? O_RDONLY : O_RDWR;
     int fd = open(disk_path, flags);
     if (fd < 0) {
@@ -709,11 +1111,11 @@ static int gpt_switch_slot(const char *disk_path, const char *mode, bool do_rebo
         utf16le_to_ascii(e->name_utf16, name, sizeof(name));
         if (strcmp(name, "boot_a") == 0 || strcmp(name, "vbmeta_a") == 0) {
             if (write_changes) e->attributes = attr_a;
-            if (strcmp(name, "vbmeta_a") == 0) cur_vba = e->attributes;
+            if (strcmp(name, "vbmeta_a") == 0 || cur_vba == 0) cur_vba = e->attributes;
             found++;
         } else if (strcmp(name, "boot_b") == 0 || strcmp(name, "vbmeta_b") == 0) {
             if (write_changes) e->attributes = attr_b;
-            if (strcmp(name, "vbmeta_b") == 0) cur_vbb = e->attributes;
+            if (strcmp(name, "vbmeta_b") == 0 || cur_vbb == 0) cur_vbb = e->attributes;
             found++;
         }
     }
@@ -732,8 +1134,10 @@ static int gpt_switch_slot(const char *disk_path, const char *mode, bool do_rebo
         hdr.header_crc32 = (uint32_t)crc32(0L, (const Bytef *)&hdr, hdr.header_size);
 
         /* Write Primary GPT entries & header */
-        pwrite(fd, entries_buf, entries_bytes, (off_t)(hdr.part_entries_lba * lba_size));
-        pwrite(fd, &hdr, sizeof(hdr), (off_t)(hdr.current_lba * lba_size));
+        if (pwrite(fd, entries_buf, entries_bytes, (off_t)(hdr.part_entries_lba * lba_size)) < 0 ||
+            pwrite(fd, &hdr, sizeof(hdr), (off_t)(hdr.current_lba * lba_size)) < 0) {
+            perror("pwrite primary GPT");
+        }
 
         /* Update Backup GPT if present */
         gpt_header_t bhdr;
@@ -742,8 +1146,10 @@ static int gpt_switch_slot(const char *disk_path, const char *mode, bool do_rebo
             bhdr.part_entries_crc32 = pe_crc;
             bhdr.header_crc32 = 0;
             bhdr.header_crc32 = (uint32_t)crc32(0L, (const Bytef *)&bhdr, bhdr.header_size);
-            pwrite(fd, entries_buf, entries_bytes, (off_t)(bhdr.part_entries_lba * lba_size));
-            pwrite(fd, &bhdr, sizeof(bhdr), (off_t)(hdr.backup_lba * lba_size));
+            if (pwrite(fd, entries_buf, entries_bytes, (off_t)(bhdr.part_entries_lba * lba_size)) < 0 ||
+                pwrite(fd, &bhdr, sizeof(bhdr), (off_t)(hdr.backup_lba * lba_size)) < 0) {
+                perror("pwrite backup GPT");
+            }
         }
         fsync(fd);
     }
@@ -758,9 +1164,14 @@ static int gpt_switch_slot(const char *disk_path, const char *mode, bool do_rebo
 #ifdef __linux__
     if (write_changes && do_reboot) {
         sync();
-        execl("/usr/bin/systemctl", "systemctl", "reboot", (char *)NULL);
+        /* Perform immediate kernel hardware reset into Coreboot/Depthcharge Slot A */
+        reboot(RB_AUTOBOOT);
         execl("/sbin/reboot", "reboot", "-f", (char *)NULL);
+        execl("/usr/sbin/reboot", "reboot", "-f", (char *)NULL);
+        _exit(1);
     }
+#else
+    (void)do_reboot;
 #endif
     return 0;
 }
@@ -826,11 +1237,11 @@ static int save_png(const char *path, const canvas_t *cv) {
     return 0;
 }
 
-static int load_boot_entries(boot_entry_t *entries, int max_entries, const char *entries_file) {
+static int load_boot_entries(boot_entry_t *entries, int max_entries, const char *entries_file, bool is_preview) {
     FILE *fp = NULL;
     if (entries_file && access(entries_file, R_OK) == 0) {
         fp = fopen(entries_file, "r");
-    } else if (access("/usr/local/bin/googleboot-scan", X_OK) == 0) {
+    } else if (!is_preview && access("/usr/local/bin/googleboot-scan", X_OK) == 0) {
         fp = popen("/usr/local/bin/googleboot-scan --list", "r");
     }
 
@@ -866,30 +1277,30 @@ static int load_boot_entries(boot_entry_t *entries, int max_entries, const char 
 
     if (count == 0) {
         snprintf(entries[0].id, sizeof(entries[0].id), "fedomakase");
-        snprintf(entries[0].title, sizeof(entries[0].title), "FEDOMAKASE LINUX");
-        snprintf(entries[0].subtitle, sizeof(entries[0].subtitle), "FEDORA 44 - OMARCHY HYPRLAND");
+        snprintf(entries[0].title, sizeof(entries[0].title), "Fedomakase Linux");
+        snprintf(entries[0].subtitle, sizeof(entries[0].subtitle), "Fedora 44 • Omarchy Hyprland");
         snprintf(entries[0].os_type, sizeof(entries[0].os_type), "omarchy");
         entries[0].needs_luks = true;
         snprintf(entries[0].luks_dev, sizeof(entries[0].luks_dev), "/dev/nvme0n1p32");
         snprintf(entries[0].action_cmd, sizeof(entries[0].action_cmd), "/usr/local/bin/googleboot-scan --boot fedomakase");
 
         snprintf(entries[1].id, sizeof(entries[1].id), "android");
-        snprintf(entries[1].title, sizeof(entries[1].title), "ANDROID 17");
-        snprintf(entries[1].subtitle, sizeof(entries[1].subtitle), "ALUMINUM OS - SLOT A (ONE-SHOT)");
+        snprintf(entries[1].title, sizeof(entries[1].title), "Android 17");
+        snprintf(entries[1].subtitle, sizeof(entries[1].subtitle), "Aluminum OS • Slot A (One-Shot)");
         snprintf(entries[1].os_type, sizeof(entries[1].os_type), "android");
         entries[1].needs_luks = false;
         snprintf(entries[1].action_cmd, sizeof(entries[1].action_cmd), "/usr/local/bin/googleboot-scan --boot android");
 
         snprintf(entries[2].id, sizeof(entries[2].id), "windows");
-        snprintf(entries[2].title, sizeof(entries[2].title), "WINDOWS 11");
-        snprintf(entries[2].subtitle, sizeof(entries[2].subtitle), "UEFI BRIDGE -> BOOTMGFW.EFI");
+        snprintf(entries[2].title, sizeof(entries[2].title), "Windows 11");
+        snprintf(entries[2].subtitle, sizeof(entries[2].subtitle), "UEFI Bridge • bootmgfw.efi");
         snprintf(entries[2].os_type, sizeof(entries[2].os_type), "windows");
         entries[2].needs_luks = false;
         snprintf(entries[2].action_cmd, sizeof(entries[2].action_cmd), "/usr/local/bin/googleboot-scan --boot windows");
 
         snprintf(entries[3].id, sizeof(entries[3].id), "usb");
-        snprintf(entries[3].title, sizeof(entries[3].title), "LIVE USB / ISO");
-        snprintf(entries[3].subtitle, sizeof(entries[3].subtitle), "SCAN & KEXEC EXTERNAL USB");
+        snprintf(entries[3].title, sizeof(entries[3].title), "Live USB / ISO");
+        snprintf(entries[3].subtitle, sizeof(entries[3].subtitle), "External USB • Live ISO");
         snprintf(entries[3].os_type, sizeof(entries[3].os_type), "usb");
         entries[3].needs_luks = false;
         snprintf(entries[3].action_cmd, sizeof(entries[3].action_cmd), "/usr/local/bin/googleboot-scan --boot usb");
@@ -926,7 +1337,7 @@ int main(int argc, char **argv) {
     load_theme_config(&theme, theme_path);
 
     boot_entry_t entries[MAX_ENTRIES];
-    int count = load_boot_entries(entries, MAX_ENTRIES, entries_file);
+    int count = load_boot_entries(entries, MAX_ENTRIES, entries_file, preview_png != NULL);
 
     if (preview_png) {
         canvas_t cv = {
@@ -1026,7 +1437,7 @@ int main(int argc, char **argv) {
         struct dirent *de;
         while ((de = readdir(d)) && ev_count < 16) {
             if (strncmp(de->d_name, "event", 5) == 0) {
-                char p[128];
+                char p[300];
                 snprintf(p, sizeof(p), "/dev/input/%s", de->d_name);
                 int fd = open(p, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
                 if (fd >= 0) ev_fds[ev_count++] = fd;
@@ -1083,7 +1494,7 @@ int main(int argc, char **argv) {
                         if (ev.code == KEY_LEFT || ev.code == KEY_UP) selected = (selected - 1 + count) % count;
                         else if (ev.code == KEY_RIGHT || ev.code == KEY_DOWN || ev.code == KEY_TAB) selected = (selected + 1) % count;
                         else if (ev.code >= KEY_1 && ev.code <= KEY_9) { int idx = ev.code - KEY_1; if (idx < count) selected = idx; }
-                        else if (ev.code == KEY_R) { count = load_boot_entries(entries, MAX_ENTRIES, entries_file); }
+                        else if (ev.code == KEY_R) { count = load_boot_entries(entries, MAX_ENTRIES, entries_file, false); }
                         else if (ev.code == KEY_ENTER || ev.code == KEY_KPENTER) {
                             if (entries[selected].needs_luks) { luks_modal = true; luks_pass[0] = '\0'; status_msg[0] = '\0'; }
                             else goto do_boot;
@@ -1092,7 +1503,7 @@ int main(int argc, char **argv) {
                         if (ev.code == KEY_ESC) { luks_modal = false; luks_pass[0] = '\0'; status_msg[0] = '\0'; }
                         else if (ev.code == KEY_BACKSPACE) { size_t l = strlen(luks_pass); if (l > 0) luks_pass[l - 1] = '\0'; }
                         else if (ev.code == KEY_ENTER || ev.code == KEY_KPENTER) {
-                            snprintf(status_msg, sizeof(status_msg), "UNLOCKING LUKS2 VOLUME - PLEASE WAIT...");
+                            snprintf(status_msg, sizeof(status_msg), "Unlocking encrypted disk...");
                             render_ui(&cv, &theme, entries, count, selected,
                                       remaining, timer_active, luks_modal, luks_pass, status_msg);
                             memcpy(fb_map, cv.pixels, creq.size);
@@ -1102,7 +1513,7 @@ int main(int argc, char **argv) {
                             setenv("GOOGLEBOOT_LUKS_DEV", entries[selected].luks_dev, 1);
                             int urc = system("/usr/local/bin/googleboot-scan --unlock");
                             if (urc == 0) {
-                                snprintf(status_msg, sizeof(status_msg), "LUKS2 UNLOCKED - LAUNCHING OPERATING SYSTEM...");
+                                snprintf(status_msg, sizeof(status_msg), "Disk unlocked • Starting operating system...");
                                 render_ui(&cv, &theme, entries, count, selected,
                                           remaining, timer_active, false, "", status_msg);
                                 memcpy(fb_map, cv.pixels, creq.size);
@@ -1110,7 +1521,7 @@ int main(int argc, char **argv) {
                                 goto do_boot;
                             } else {
                                 luks_pass[0] = '\0';
-                                snprintf(status_msg, sizeof(status_msg), "INCORRECT PASSPHRASE - TRY AGAIN (ESC TO CANCEL)");
+                                snprintf(status_msg, sizeof(status_msg), "INCORRECT PASSPHRASE - TRY AGAIN");
                             }
                         } else {
                             static const char map_norm[64] = {
@@ -1161,6 +1572,9 @@ int main(int argc, char **argv) {
 do_boot:
     ioctl(drm_fd, DRM_IOCTL_DROP_MASTER, 0);
     close(drm_fd);
+    if (strcmp(entries[selected].id, "android") == 0 || strcmp(entries[selected].os_type, "android") == 0) {
+        gpt_switch_slot(disk_path, "android-once", true);
+    }
     if (entries[selected].action_cmd[0]) {
         if (entries[selected].needs_luks && luks_pass[0])
             setenv("GOOGLEBOOT_LUKS_PASS", luks_pass, 1);

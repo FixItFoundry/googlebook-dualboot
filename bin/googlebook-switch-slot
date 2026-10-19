@@ -1,0 +1,103 @@
+#!/bin/bash
+# googlebook-switch-slot
+# Switches the active Depthcharge A/B boot slot on the Acer Googlebook 14 (Moonstone)
+# between Slot A (Android / Aluminum OS) and Slot B (Fedomakase Linux) by toggling
+# the ChromeOS/Depthcharge GPT attribute flags on vbmeta_a (p15) and vbmeta_b (p16).
+#
+# Usage:
+#   sudo googlebook-switch-slot [status|a|b|android|linux] [--reboot]
+set -euo pipefail
+
+DISK="${GOOGLEBOOK_DISK:-}"
+if [[ -z "$DISK" ]]; then
+  BOOT_SRC=$(findmnt -no SOURCE /boot 2>/dev/null || findmnt -no SOURCE / | sed 's/\[.*\]//')
+  DEV="$BOOT_SRC"
+  while [[ "$(lsblk -ndo TYPE "$DEV" 2>/dev/null | head -1)" != "disk" ]]; do
+    parent=$(lsblk -ndo PKNAME "$DEV" 2>/dev/null | head -1)
+    [[ -n "$parent" ]] || break
+    DEV="/dev/$parent"
+  done
+  if [[ -b "$DEV" && "$(lsblk -ndo TYPE "$DEV" 2>/dev/null)" == "disk" ]]; then
+    DISK="$DEV"
+  elif [[ -b /dev/nvme0n1 ]]; then
+    DISK="/dev/nvme0n1"
+  fi
+fi
+
+[[ -b "$DISK" ]] || { echo "Error: cannot determine Googlebook disk ($DISK)" >&2; exit 1; }
+
+partnum() {
+  sgdisk -p "$DISK" | awk -v l="$1" '$7==l{print $1}' | head -1
+}
+
+P_BOOT_A=$(partnum boot_a)
+P_BOOT_B=$(partnum boot_b)
+P_VBMETA_A=$(partnum vbmeta_a)
+P_VBMETA_B=$(partnum vbmeta_b)
+[[ -n "$P_VBMETA_A" && -n "$P_VBMETA_B" ]] || { echo "Error: vbmeta_a / vbmeta_b not found on $DISK" >&2; exit 1; }
+
+attr_of() {
+  sgdisk -i "$1" "$DISK" | awk -F': ' '/Attribute flags/{print $2}'
+}
+
+set_slot_attrs() {
+  local attr_a="$1" attr_b="$2"
+  local args=(
+    "--attributes=${P_VBMETA_A}:=${attr_a}"
+    "--attributes=${P_VBMETA_B}:=${attr_b}"
+  )
+  [[ -n "$P_BOOT_A" ]] && args+=("--attributes=${P_BOOT_A}:=${attr_a}")
+  [[ -n "$P_BOOT_B" ]] && args+=("--attributes=${P_BOOT_B}:=${attr_b}")
+  sgdisk "${args[@]}" "$DISK" >/dev/null
+}
+
+show_status() {
+  local attr_a attr_b
+  attr_a=$(attr_of "$P_VBMETA_A")
+  attr_b=$(attr_of "$P_VBMETA_B")
+  echo "Disk: $DISK"
+  echo "  Slot A (Android / boot_a p${P_BOOT_A:-?}, vbmeta_a p$P_VBMETA_A): $attr_a"
+  echo "  Slot B (Linux   / boot_b p${P_BOOT_B:-?}, vbmeta_b p$P_VBMETA_B): $attr_b"
+  if [[ "$attr_a" > "$attr_b" ]]; then
+    echo "Active boot slot: A (Android / Aluminum OS)"
+  else
+    echo "Active boot slot: B (Linux)"
+  fi
+}
+
+ACTION="${1:-status}"
+REBOOT=0
+[[ "${2:-}" == "--reboot" || "${2:-}" == "-r" ]] && REBOOT=1
+
+case "$ACTION" in
+  status)
+    show_status
+    ;;
+  a|A|android)
+    [[ $EUID -eq 0 ]] || { echo "Run with sudo: sudo $0 $*" >&2; exit 1; }
+    set_slot_attrs "0102000000000000" "0001000000000000"
+    echo "Switched active slot to Slot A (Android / Aluminum OS) on $DISK."
+    show_status
+    (( REBOOT )) && systemctl reboot
+    ;;
+  oneshot-a|android-once)
+    [[ $EUID -eq 0 ]] || { echo "Run with sudo: sudo $0 $*" >&2; exit 1; }
+    # Slot A: priority=15, tries=1, successful=0 (001f000000000000)
+    # Slot B: priority=14, tries=0, successful=1 (010e000000000000)
+    set_slot_attrs "001f000000000000" "010e000000000000"
+    echo "Armed one-shot boot to Slot A (Android) with automatic fallback to Slot B (Linux)."
+    show_status
+    (( REBOOT )) && systemctl reboot
+    ;;
+  b|B|linux|fedomakase)
+    [[ $EUID -eq 0 ]] || { echo "Run with sudo: sudo $0 $*" >&2; exit 1; }
+    set_slot_attrs "0001000000000000" "0102000000000000"
+    echo "Switched active slot to Slot B (Linux) on $DISK."
+    show_status
+    (( REBOOT )) && systemctl reboot
+    ;;
+  *)
+    echo "Usage: sudo $(basename "$0") [status|a|b|android|android-once|linux] [--reboot]" >&2
+    exit 1
+    ;;
+esac

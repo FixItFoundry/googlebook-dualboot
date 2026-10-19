@@ -1,0 +1,153 @@
+#!/bin/bash
+# fedomakase-googlebook-slotb
+# Packs the installed Fedomakase kernel + dracut initramfs into the Googlebook's
+# Android Slot B (boot_b / init_boot_b / vendor_boot_b) on the disk that holds "/".
+# depthcharge (coreboot payload) boots Slot B directly; no GRUB/UEFI involved.
+#
+# Usage: fedomakase-googlebook-slotb [kernel-version] [target-disk]
+#   Called from kickstart %post and from /etc/kernel/install.d on kernel updates.
+set -euo pipefail
+
+log() { echo "[googlebook-slotb] $*"; }
+
+KVER="${1:-}"
+if [[ -z "$KVER" ]]; then
+  KVER=$(ls -1 /lib/modules | sort -V | tail -1)
+fi
+VMLINUZ="/lib/modules/$KVER/vmlinuz"
+[[ -f "$VMLINUZ" ]] || VMLINUZ="/boot/vmlinuz-$KVER"
+[[ -f "$VMLINUZ" ]] || { log "no kernel image for $KVER"; exit 1; }
+
+DISK="${2:-}"
+if [[ -z "$DISK" ]]; then
+  # Locate the disk that holds /boot or / (never by global partlabel alone,
+  # since during USB-C cloning the source drive may also be attached)
+  BOOT_SRC=$(findmnt -no SOURCE /boot 2>/dev/null || findmnt -no SOURCE / | sed 's/\[.*\]//')
+  DEV="$BOOT_SRC"
+  while [[ "$(lsblk -ndo TYPE "$DEV" 2>/dev/null | head -1)" != "disk" ]]; do
+    parent=$(lsblk -ndo PKNAME "$DEV" 2>/dev/null | head -1)
+    [[ -n "$parent" ]] || break
+    DEV="/dev/$parent"
+  done
+  DISK="$DEV"
+fi
+
+partdev() { lsblk -lnpo NAME,PARTLABEL "$DISK" | awk -v l="$1" '$2==l{print $1}' | head -1; }
+BOOT_B=$(partdev boot_b); INIT_B=$(partdev init_boot_b); VEND_B=$(partdev vendor_boot_b)
+if [[ -z "$BOOT_B" || -z "$INIT_B" || -z "$VEND_B" ]]; then
+  log "no Android Slot B partitions on $DISK; not a Googlebook disk layout, skipping"
+  exit 0
+fi
+log "kernel $KVER  disk $DISK"
+log "targets: $BOOT_B $INIT_B $VEND_B"
+
+export PATH="/usr/share/omarchy/bin:/usr/local/bin:$PATH"
+command -v mkbootimg >/dev/null || dnf install -y android-tools >/dev/null 2>&1 || true
+command -v mkbootimg >/dev/null || { log "mkbootimg unavailable"; exit 1; }
+
+# --- ensure coreboot_table.ko & framebuffer-coreboot.ko are installed for $KVER ---
+mkdir -p "/lib/modules/$KVER/extra"
+if [[ -d "/usr/share/omarchy/install/hardware/modules/$KVER" ]]; then
+  cp -f "/usr/share/omarchy/install/hardware/modules/$KVER"/*.ko "/lib/modules/$KVER/extra/" 2>/dev/null || true
+elif [[ -d "/usr/share/omarchy/install/hardware/coreboot-mods" && -d "/lib/modules/$KVER/build" ]]; then
+  CB_BUILD=$(mktemp -d)
+  cp -rf /usr/share/omarchy/install/hardware/coreboot-mods/* "$CB_BUILD/"
+  make -C "/lib/modules/$KVER/build" M="$CB_BUILD" modules >/dev/null 2>&1 || true
+  cp -f "$CB_BUILD"/*.ko "/lib/modules/$KVER/extra/" 2>/dev/null || true
+  rm -rf "$CB_BUILD"
+fi
+depmod -a "$KVER" 2>/dev/null || true
+
+mkdir -p /etc/modules-load.d /etc/modprobe.d /etc/dracut.conf.d
+printf "coreboot_table\nframebuffer-coreboot\n" > /etc/modules-load.d/coreboot-fb.conf
+rm -f /etc/modprobe.d/googlebook-no-xe.conf
+printf "blacklist i915\nblacklist xe\n" > /etc/modprobe.d/googlebook-xe-staged.conf
+cat > /etc/dracut.conf.d/90-googlebook-slotb.conf <<'EOF'
+omit_drivers+=" i915 xe amdgpu radeon nouveau cxgb4 "
+add_drivers+=" nvme nvme_core btrfs uas usb_storage coreboot_table framebuffer-coreboot cros_ec cros_ec_lpcs cros_ec_keyb "
+compress="zstd -19 -T0"
+EOF
+
+W=$(mktemp -d)
+trap 'rm -rf "$W"' EXIT
+
+# --- build hostonly initramfs omitting blacklisted GPU firmware so it fits in Slot B ---
+dracut -f --hostonly --kver "$KVER" \
+  --omit-drivers "i915 xe amdgpu radeon nouveau cxgb4" \
+  --add-drivers "nvme nvme_core btrfs uas usb_storage coreboot_table framebuffer-coreboot cros_ec cros_ec_lpcs cros_ec_keyb" \
+  --compress "zstd -19 -T0" "$W/initramfs.img" >/dev/null
+
+# --- kernel command line ---
+ROOT_UUID=$(findmnt -no UUID /)
+SUBVOL=$(findmnt -no OPTIONS / | tr ',' '\n' | sed -n 's/^subvol=\/\{0,1\}//p' | head -1)
+CMDLINE="root=UUID=$ROOT_UUID rw console=tty0 rd.driver.pre=coreboot_table,framebuffer-coreboot clk_ignore_unused quiet rhgb bootconfig"
+[[ -n "$SUBVOL" ]] && CMDLINE="$CMDLINE rootflags=subvol=$SUBVOL"
+if [[ -s /etc/crypttab ]]; then
+  while read -r _name dev _rest; do
+    [[ -z "$_name" || "$_name" == \#* ]] && continue
+    CMDLINE="$CMDLINE rd.luks.uuid=${dev#UUID=}"
+  done < /etc/crypttab
+fi
+log "cmdline: $CMDLINE"
+
+# --- pack vendor_boot (32 MiB) + init_boot (8 MiB) as independent cpio.zst archives ---
+VEND_MAX=$((33554432 - 65536))
+INIT_MAX=$((8388608 - 8192))
+SZ=$(stat -c %s "$W/initramfs.img")
+log "initramfs size: $SZ bytes"
+
+if (( SZ <= VEND_MAX - 4096 )); then
+  cp "$W/initramfs.img" "$W/rd_vendor"
+  (cd "$W" && mkdir -p e && cd e && echo . | cpio -o -H newc -R 0:0 --quiet | zstd -q) > "$W/rd_init"
+else
+  # Unpack and split into two independent compressed cpio archives (rd_vendor + rd_init)
+  # so depthcharge page-alignment padding between vendor_boot and init_boot never corrupts a stream
+  mkdir -p "$W/unpacked" "$W/split_init/usr/lib"
+  (cd "$W/unpacked" && ( /usr/lib/dracut/skipcpio "$W/initramfs.img" 2>/dev/null || cat "$W/initramfs.img" ) | zstd -d | cpio -idm --quiet)
+  rm -rf "$W/unpacked/usr/lib/firmware"/{xe,i915,amdgpu,radeon,nvidia,cxgb4,LENOVO,dell,HP} 2>/dev/null || true
+  mv "$W/unpacked/usr/lib/modules" "$W/split_init/usr/lib/modules"
+  (cd "$W/unpacked" && find . -print0 | cpio --null -o -H newc --quiet | zstd -19 -T0 > "$W/rd_vendor")
+  (cd "$W/split_init" && find . -print0 | cpio --null -o -H newc --quiet | zstd -19 -T0 > "$W/rd_init")
+fi
+
+VSZ=$(stat -c %s "$W/rd_vendor")
+ISZ=$(stat -c %s "$W/rd_init")
+log "rd_vendor: $VSZ bytes (limit $VEND_MAX), rd_init: $ISZ bytes (limit $INIT_MAX)"
+(( VSZ <= VEND_MAX )) || { log "rd_vendor too large ($VSZ > $VEND_MAX)"; exit 1; }
+(( ISZ <= INIT_MAX )) || { log "rd_init too large ($ISZ > $INIT_MAX)"; exit 1; }
+
+printf 'androidboot.fedomakase=1\n' > "$W/bootconfig"
+
+mkbootimg --header_version 4 --kernel "$VMLINUZ" --cmdline "" \
+  --os_version 17.0.0 --os_patch_level 2026-09 -o "$W/boot_b.img"
+mkbootimg --header_version 4 --ramdisk "$W/rd_init" \
+  --os_version 17.0.0 --os_patch_level 2026-09 -o "$W/init_boot_b.img"
+mkbootimg --header_version 4 --pagesize 0x800 --vendor_cmdline "$CMDLINE" \
+  --vendor_bootconfig "$W/bootconfig" \
+  --ramdisk_type platform --ramdisk_name '' --vendor_ramdisk_fragment "$W/rd_vendor" \
+  --vendor_boot "$W/vendor_boot_b.img"
+
+for pair in "boot_b.img:$BOOT_B" "init_boot_b.img:$INIT_B" "vendor_boot_b.img:$VEND_B"; do
+  img="$W/${pair%%:*}"; dev="${pair#*:}"
+  psz=$(blockdev --getsize64 "$dev"); isz=$(stat -c %s "$img")
+  (( isz <= psz )) || { log "$img ($isz) larger than $dev ($psz)"; exit 1; }
+  dd if="$img" of="$dev" bs=1M conv=fsync status=none
+  h1=$(sha256sum "$img" | awk '{print $1}')
+  h2=$(head -c "$isz" "$dev" | sha256sum | awk '{print $1}')
+  [[ "$h1" == "$h2" ]] || { log "verify failed on $dev"; exit 1; }
+  log "wrote $(basename "$img") -> $dev"
+done
+
+# kernel-install hook so every kernel update refreshes Slot B
+HOOK=/etc/kernel/install.d/95-fedomakase-googlebook-slotb.install
+if [[ ! -f "$HOOK" ]]; then
+  mkdir -p /etc/kernel/install.d
+  cat > "$HOOK" <<'EOF'
+#!/bin/sh
+# Refresh Googlebook Slot B (depthcharge) on kernel install
+[ "$1" = "add" ] || exit 0
+/usr/share/omarchy/bin/fedomakase-googlebook-slotb "$2" || true
+EOF
+  chmod +x "$HOOK"
+fi
+log "done"

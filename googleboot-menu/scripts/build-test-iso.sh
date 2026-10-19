@@ -29,7 +29,7 @@ cp -a "$RD_VENDOR_SRC" "$RD_VENDOR_DIR"
 echo "==> 3. Packing combined initramfs for ISO & Slot B..."
 (
   cd "$RD_VENDOR_DIR"
-  find . -print0 | cpio --null -o -H newc | zstd -3 -T0 > "$WORK_DIR/rd_vendor_menu.img"
+  find . -print0 | cpio --null -o -H newc | zstd --ultra -22 -T0 > "$WORK_DIR/rd_vendor_menu.img"
 )
 cat "$WORK_DIR/rd_vendor_menu.img" "$RD_INIT_IMG" > "$WORK_DIR/iso/boot/initrd.img"
 cp -f "$KERNEL_IMG" "$WORK_DIR/iso/boot/vmlinuz"

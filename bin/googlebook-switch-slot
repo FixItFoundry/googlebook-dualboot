@@ -26,6 +26,10 @@ fi
 
 [[ -b "$DISK" ]] || { echo "Error: cannot determine Googlebook disk ($DISK)" >&2; exit 1; }
 
+if ! command -v sgdisk >/dev/null 2>&1 && [[ -x /usr/local/bin/googleboot-menu ]]; then
+  exec /usr/local/bin/googleboot-menu --switch-slot "${1:-status}" --disk "$DISK" ${2:+--reboot}
+fi
+
 partnum() {
   sgdisk -p "$DISK" | awk -v l="$1" '$7==l{print $1}' | head -1
 }

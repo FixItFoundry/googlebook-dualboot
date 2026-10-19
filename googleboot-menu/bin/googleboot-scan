@@ -1,6 +1,7 @@
 #!/bin/bash
 # googleboot-scan
-# Petitboot-style OS discovery & kexec/Slot-A/UEFI-bridge execution backend for googleboot-menu.
+# Petitboot-style OS discovery, LUKS2 unlock, GPT A/B slot switch, and kexec/switch-root
+# execution backend for googleboot-menu.
 # Uses pure built-in bash string manipulation (zero dependency on awk/cut/ls/basename in minimal initramfs).
 #
 # Output format for `--list`:
@@ -12,11 +13,12 @@ MNT_BASE="/run/googleboot"
 BOOT_MNT="$MNT_BASE/boot"
 USB_MNT="$MNT_BASE/usb"
 STATE_FILE="$MNT_BASE/entries.db"
+KEY_FILE="$MNT_BASE/luks.key"
 mkdir -p "$BOOT_MNT" "$USB_MNT" 2>/dev/null || true
 
-modprobe nvme nvme_core ext4 btrfs vfat fat usb_storage uas 2>/dev/null || true
+modprobe nvme nvme_core ext4 btrfs vfat fat dm_crypt usb_storage uas 2>/dev/null || true
 
-DISK="/dev/nvme0n1"
+DISK="${GOOGLEBOOK_DISK:-/dev/nvme0n1}"
 BOOT_PART="${GOOGLEBOOK_BOOT_PART:-/dev/nvme0n1p31}"
 ROOT_PART="${GOOGLEBOOK_ROOT_PART:-/dev/nvme0n1p32}"
 
@@ -25,6 +27,30 @@ if [[ ! -b "$BOOT_PART" && -b /dev/nvme0n1p1 ]]; then
   BOOT_PART="/dev/nvme0n1p1"
   ROOT_PART="/dev/nvme0n1p2"
 fi
+
+is_luks_part() {
+  local dev="$1"
+  [[ -b "$dev" ]] || return 1
+  local fstype=""
+  fstype=$(blkid -s TYPE -o value "$dev" 2>/dev/null || true)
+  if [[ "$fstype" == "crypto_LUKS" ]]; then
+    return 0
+  fi
+  if command -v cryptsetup >/dev/null 2>&1 && cryptsetup isLuks "$dev" 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
+get_luks_uuid() {
+  local dev="$1"
+  local uuid=""
+  uuid=$(blkid -s UUID -o value "$dev" 2>/dev/null || true)
+  if [[ -z "$uuid" ]] && command -v cryptsetup >/dev/null 2>&1; then
+    uuid=$(cryptsetup luksUUID "$dev" 2>/dev/null || true)
+  fi
+  echo "$uuid"
+}
 
 mount_boot_ro() {
   if [[ -b "$BOOT_PART" ]] && [[ ! -d "$BOOT_MNT/loader" && ! -d "$BOOT_MNT/EFI" ]]; then
@@ -43,13 +69,52 @@ detect_os_type() {
   fi
 }
 
+unlock_luks() {
+  local dev="${GOOGLEBOOT_LUKS_DEV:-$ROOT_PART}"
+  local pass="${GOOGLEBOOT_LUKS_PASS:-}"
+  [[ -b "$dev" ]] || { echo "Error: LUKS device $dev not found" >&2; return 1; }
+
+  local uuid
+  uuid=$(get_luks_uuid "$dev")
+  local mapper_name="luks-${uuid:-root}"
+
+  if [[ -b "/dev/mapper/$mapper_name" ]]; then
+    return 0
+  fi
+
+  [[ -n "$pass" ]] || { echo "Error: empty LUKS passphrase" >&2; return 1; }
+
+  printf '%s' "$pass" > "$KEY_FILE"
+  chmod 600 "$KEY_FILE"
+
+  local rc=1
+  if [[ -x /usr/bin/systemd-cryptsetup ]]; then
+    /usr/bin/systemd-cryptsetup attach "$mapper_name" "$dev" "$KEY_FILE" discard
+    rc=$?
+  elif command -v cryptsetup >/dev/null 2>&1; then
+    cryptsetup open "$dev" "$mapper_name" --key-file "$KEY_FILE" --allow-discards
+    rc=$?
+  fi
+  rm -f "$KEY_FILE"
+
+  if [[ $rc -eq 0 ]]; then
+    udevadm trigger --action=change 2>/dev/null || true
+    udevadm settle --timeout=5 2>/dev/null || true
+  fi
+  return $rc
+}
+
 scan_entries() {
   : > "$STATE_FILE" 2>/dev/null || true
   mount_boot_ro
 
   local needs_luks=0
-  if [[ -b "$ROOT_PART" ]] && cryptsetup isLuks "$ROOT_PART" 2>/dev/null; then
-    needs_luks=1
+  if is_luks_part "$ROOT_PART"; then
+    local uuid
+    uuid=$(get_luks_uuid "$ROOT_PART")
+    if [[ ! -b "/dev/mapper/luks-${uuid:-root}" ]]; then
+      needs_luks=1
+    fi
   fi
 
   # 1. Scan BootLoaderSpec (BLS) entries on /boot (/loader/entries/*.conf)
@@ -73,7 +138,7 @@ scan_entries() {
 
       local os_type
       os_type=$(detect_os_type "$title")
-      echo "${id}|${title:-LINUX}|KERNEL ${version} - DIRECT KEXEC|${os_type}|${needs_luks}|${ROOT_PART}|/usr/local/bin/googleboot-scan --boot ${id}"
+      echo "${id}|${title:-LINUX}|KERNEL ${version} - DIRECT BOOT|${os_type}|${needs_luks}|${ROOT_PART}|/usr/local/bin/googleboot-scan --boot ${id}"
       echo "${id}|${BOOT_MNT}/${linux}|${BOOT_MNT}/${initrd}|${options}" >> "$STATE_FILE"
     done
   fi
@@ -88,7 +153,7 @@ scan_entries() {
       [[ -f "$initrd" ]] || initrd="$BOOT_MNT/initrd.img-${kver}"
       local id="kver:${kver}"
       local luks_uuid="" cmdline
-      luks_uuid=$(cryptsetup luksUUID "$ROOT_PART" 2>/dev/null || true)
+      luks_uuid=$(get_luks_uuid "$ROOT_PART")
       cmdline="console=tty0 rw rootflags=subvol=root rd.luks.uuid=${luks_uuid} clk_ignore_unused selinux=0"
       echo "${id}|FEDOMAKASE LINUX|KERNEL ${kver^^} - OMARCHY|omarchy|${needs_luks}|${ROOT_PART}|/usr/local/bin/googleboot-scan --boot ${id}"
       echo "${id}|${vmlinuz}|${initrd}|${cmdline}" >> "$STATE_FILE"
@@ -143,7 +208,12 @@ boot_entry() {
 
   case "$target_id" in
     android)
-      /usr/local/bin/googlebook-switch-slot android-once --reboot
+      umount "$BOOT_MNT" 2>/dev/null || true
+      if [[ -x /usr/local/bin/googleboot-menu ]]; then
+        /usr/local/bin/googleboot-menu --switch-slot android-once --disk "$DISK" --reboot
+      else
+        /usr/local/bin/googlebook-switch-slot android-once --reboot
+      fi
       exit 0
       ;;
     windows)
@@ -156,11 +226,33 @@ boot_entry() {
         exit 1
       fi
       ;;
+    fedomakase)
+      # Direct switch-root via Slot B initramfs if /boot didn't have a separate kernel entry
+      if [[ -n "${GOOGLEBOOT_LUKS_PASS:-}" ]]; then
+        unlock_luks || exit 1
+      fi
+      umount "$BOOT_MNT" 2>/dev/null || true
+      exit 0
+      ;;
     *)
       [[ -f "$STATE_FILE" ]] || scan_entries >/dev/null
       local fid fkernel finitrd fcmdline
       while IFS='|' read -r fid fkernel finitrd fcmdline; do
         if [[ "$fid" == "$target_id" ]]; then
+          if [[ -n "${GOOGLEBOOT_LUKS_PASS:-}" ]]; then
+            unlock_luks || exit 1
+          fi
+          local running_kver=""
+          running_kver=$(uname -r 2>/dev/null || true)
+          # If running inside Slot B initramfs and selected kernel matches running Slot B kernel,
+          # skip redundant kexec so systemd mounts /sysroot, runs googlebook-sysroot-sync, and switch-roots cleanly!
+          if [[ -f /etc/initrd-release && -n "$running_kver" && "$fkernel" == *"$running_kver"* && "$target_id" != usb:* ]]; then
+            echo "[googleboot-scan] Target kernel matches running Slot B ($running_kver); proceeding via direct switch-root..."
+            umount "$BOOT_MNT" 2>/dev/null || true
+            udevadm settle --timeout=5 2>/dev/null || true
+            exit 0
+          fi
+
           echo "[googleboot-scan] kexec loading $fkernel (initrd=$finitrd)..."
           if [[ -n "$finitrd" && -f "$finitrd" ]]; then
             kexec -l "$fkernel" --initrd="$finitrd" --command-line="$fcmdline"
@@ -181,11 +273,14 @@ case "${1:---list}" in
   --list)
     scan_entries
     ;;
+  --unlock)
+    unlock_luks
+    ;;
   --boot)
     boot_entry "${2:?Missing entry ID}"
     ;;
   *)
-    echo "Usage: $0 [--list | --boot <id>]" >&2
+    echo "Usage: $0 [--list | --unlock | --boot <id>]" >&2
     exit 1
     ;;
 esac

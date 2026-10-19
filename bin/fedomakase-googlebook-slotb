@@ -96,19 +96,26 @@ INIT_MAX=$((8388608 - 8192))
 SZ=$(stat -c %s "$W/initramfs.img")
 log "initramfs size: $SZ bytes"
 
-if (( SZ <= VEND_MAX - 4096 )); then
-  cp "$W/initramfs.img" "$W/rd_vendor"
-  (cd "$W" && mkdir -p e && cd e && echo . | cpio -o -H newc -R 0:0 --quiet | zstd -q) > "$W/rd_init"
-else
-  # Unpack and split into two independent compressed cpio archives (rd_vendor + rd_init)
-  # so depthcharge page-alignment padding between vendor_boot and init_boot never corrupts a stream
-  mkdir -p "$W/unpacked" "$W/split_init/usr/lib"
-  (cd "$W/unpacked" && ( /usr/lib/dracut/skipcpio "$W/initramfs.img" 2>/dev/null || cat "$W/initramfs.img" ) | zstd -d | cpio -idm --quiet)
-  rm -rf "$W/unpacked/usr/lib/firmware"/{xe,i915,amdgpu,radeon,nvidia,cxgb4,LENOVO,dell,HP} 2>/dev/null || true
-  mv "$W/unpacked/usr/lib/modules" "$W/split_init/usr/lib/modules"
-  (cd "$W/unpacked" && find . -print0 | cpio --null -o -H newc --quiet | zstd -19 -T0 > "$W/rd_vendor")
-  (cd "$W/split_init" && find . -print0 | cpio --null -o -H newc --quiet | zstd -19 -T0 > "$W/rd_init")
-fi
+# --- unpack and split into two independent compressed cpio archives (rd_vendor + rd_init) ---
+# Also inject googleboot-menu so Slot B always boots into the graphical OS selector!
+mkdir -p "$W/unpacked" "$W/split_init/usr/lib"
+(cd "$W/unpacked" && ( /usr/lib/dracut/skipcpio "$W/initramfs.img" 2>/dev/null || cat "$W/initramfs.img" ) | zstd -d | cpio -idm --quiet)
+rm -rf "$W/unpacked/usr/lib/firmware"/{xe,i915,amdgpu,radeon,nvidia,cxgb4,LENOVO,dell,HP} 2>/dev/null || true
+mv "$W/unpacked/usr/lib/modules" "$W/split_init/usr/lib/modules"
+
+SELF_DIR="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd || true)"
+for menu_installer in \
+  "$SELF_DIR/googleboot-menu/scripts/install-into-initramfs.sh" \
+  "/usr/share/omarchy/googleboot-menu/scripts/install-into-initramfs.sh" \
+  "/usr/local/share/googleboot-menu/scripts/install-into-initramfs.sh"; do
+  if [[ -x "$menu_installer" ]]; then
+    "$menu_installer" "$W/unpacked"
+    break
+  fi
+done
+
+(cd "$W/unpacked" && find . -print0 | cpio --null -o -H newc --quiet | zstd --ultra -22 -T0 > "$W/rd_vendor")
+(cd "$W/split_init" && find . -print0 | cpio --null -o -H newc --quiet | zstd --ultra -22 -T0 > "$W/rd_init")
 
 VSZ=$(stat -c %s "$W/rd_vendor")
 ISZ=$(stat -c %s "$W/rd_init")

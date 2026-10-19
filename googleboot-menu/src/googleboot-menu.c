@@ -599,9 +599,170 @@ static void render_ui(canvas_t *cv, const theme_config_t *t,
             draw_text(cv, mask, (int)(ibx + 28 * sf), (int)(iby + 30 * sf), s_card, 0, t->accent);
         }
 
-        draw_text(cv, "ENTER: UNLOCK & KEXEC BOOT    -    ESC: CANCEL",
-                  w / 2, (int)(my + mh - 64 * sf), s_sub, 1, t->subtext);
+        const char *mfooter = (status_msg && status_msg[0]) ? status_msg : "ENTER: UNLOCK & BOOT    -    ESC: CANCEL";
+        draw_text(cv, mfooter, w / 2, (int)(my + mh - 64 * sf), s_sub, 1,
+                  (status_msg && status_msg[0]) ? t->accent : t->subtext);
     }
+}
+
+/*
+ * Native GPT A/B Depthcharge Slot Switcher (zero dependency on sgdisk/libpopt/libstdc++).
+ * Updates both Primary and Backup GPT headers & partition entry arrays on 512B or 4096B disks.
+ */
+#pragma pack(push, 1)
+typedef struct {
+    char     signature[8];
+    uint32_t revision;
+    uint32_t header_size;
+    uint32_t header_crc32;
+    uint32_t reserved;
+    uint64_t current_lba;
+    uint64_t backup_lba;
+    uint64_t first_usable_lba;
+    uint64_t last_usable_lba;
+    uint8_t  disk_guid[16];
+    uint64_t part_entries_lba;
+    uint32_t num_part_entries;
+    uint32_t size_part_entry;
+    uint32_t part_entries_crc32;
+} gpt_header_t;
+
+typedef struct {
+    uint8_t  type_guid[16];
+    uint8_t  unique_guid[16];
+    uint64_t first_lba;
+    uint64_t last_lba;
+    uint64_t attributes;
+    uint16_t name_utf16[36];
+} gpt_entry_t;
+#pragma pack(pop)
+
+static void utf16le_to_ascii(const uint16_t *in, char *out, size_t max_len) {
+    size_t i = 0;
+    for (; i < 36 && i + 1 < max_len && in[i] != 0; i++) {
+        out[i] = (char)(in[i] & 0x7F);
+    }
+    out[i] = '\0';
+}
+
+static int gpt_switch_slot(const char *disk_path, const char *mode, bool do_reboot) {
+    (void)do_reboot;
+    int flags = (strcmp(mode, "status") == 0) ? O_RDONLY : O_RDWR;
+    int fd = open(disk_path, flags);
+    if (fd < 0) {
+        perror("open disk for GPT slot switch");
+        return 1;
+    }
+
+    /* Auto-detect 512-byte vs 4096-byte logical sector size by locating "EFI PART" at LBA 1 */
+    size_t lba_size = 0;
+    gpt_header_t hdr;
+    const size_t candidates[2] = {512, 4096};
+    for (int i = 0; i < 2; i++) {
+        if (pread(fd, &hdr, sizeof(hdr), (off_t)candidates[i]) == sizeof(hdr) &&
+            memcmp(hdr.signature, "EFI PART", 8) == 0) {
+            lba_size = candidates[i];
+            break;
+        }
+    }
+    if (lba_size == 0) {
+        fprintf(stderr, "Error: no valid GPT header found on %s\n", disk_path);
+        close(fd);
+        return 1;
+    }
+
+    size_t entries_bytes = (size_t)hdr.num_part_entries * hdr.size_part_entry;
+    uint8_t *entries_buf = malloc(entries_bytes);
+    if (!entries_buf || pread(fd, entries_buf, entries_bytes, (off_t)(hdr.part_entries_lba * lba_size)) != (ssize_t)entries_bytes) {
+        fprintf(stderr, "Error: failed reading GPT partition entries from %s\n", disk_path);
+        free(entries_buf);
+        close(fd);
+        return 1;
+    }
+
+    uint64_t attr_a = 0, attr_b = 0;
+    bool write_changes = false;
+    if (strcmp(mode, "a") == 0 || strcmp(mode, "android") == 0) {
+        attr_a = 0x0102000000000000ULL;
+        attr_b = 0x0001000000000000ULL;
+        write_changes = true;
+    } else if (strcmp(mode, "android-once") == 0 || strcmp(mode, "oneshot-a") == 0) {
+        attr_a = 0x001f000000000000ULL; /* Priority=15, Tries=1, Successful=0 */
+        attr_b = 0x010e000000000000ULL; /* Priority=14, Tries=0, Successful=1 */
+        write_changes = true;
+    } else if (strcmp(mode, "b") == 0 || strcmp(mode, "linux") == 0 || strcmp(mode, "fedomakase") == 0) {
+        attr_a = 0x0001000000000000ULL;
+        attr_b = 0x0102000000000000ULL;
+        write_changes = true;
+    } else if (strcmp(mode, "status") != 0) {
+        fprintf(stderr, "Unknown slot mode: %s (expected status|a|b|android-once)\n", mode);
+        free(entries_buf);
+        close(fd);
+        return 1;
+    }
+
+    uint64_t cur_vba = 0, cur_vbb = 0;
+    int found = 0;
+    for (uint32_t i = 0; i < hdr.num_part_entries; i++) {
+        gpt_entry_t *e = (gpt_entry_t *)(entries_buf + (size_t)i * hdr.size_part_entry);
+        char name[40];
+        utf16le_to_ascii(e->name_utf16, name, sizeof(name));
+        if (strcmp(name, "boot_a") == 0 || strcmp(name, "vbmeta_a") == 0) {
+            if (write_changes) e->attributes = attr_a;
+            if (strcmp(name, "vbmeta_a") == 0) cur_vba = e->attributes;
+            found++;
+        } else if (strcmp(name, "boot_b") == 0 || strcmp(name, "vbmeta_b") == 0) {
+            if (write_changes) e->attributes = attr_b;
+            if (strcmp(name, "vbmeta_b") == 0) cur_vbb = e->attributes;
+            found++;
+        }
+    }
+
+    if (found == 0) {
+        fprintf(stderr, "Error: boot_a/boot_b/vbmeta_a/vbmeta_b partitions not found on %s\n", disk_path);
+        free(entries_buf);
+        close(fd);
+        return 1;
+    }
+
+    if (write_changes) {
+        uint32_t pe_crc = (uint32_t)crc32(0L, entries_buf, (uInt)entries_bytes);
+        hdr.part_entries_crc32 = pe_crc;
+        hdr.header_crc32 = 0;
+        hdr.header_crc32 = (uint32_t)crc32(0L, (const Bytef *)&hdr, hdr.header_size);
+
+        /* Write Primary GPT entries & header */
+        pwrite(fd, entries_buf, entries_bytes, (off_t)(hdr.part_entries_lba * lba_size));
+        pwrite(fd, &hdr, sizeof(hdr), (off_t)(hdr.current_lba * lba_size));
+
+        /* Update Backup GPT if present */
+        gpt_header_t bhdr;
+        if (pread(fd, &bhdr, sizeof(bhdr), (off_t)(hdr.backup_lba * lba_size)) == sizeof(bhdr) &&
+            memcmp(bhdr.signature, "EFI PART", 8) == 0) {
+            bhdr.part_entries_crc32 = pe_crc;
+            bhdr.header_crc32 = 0;
+            bhdr.header_crc32 = (uint32_t)crc32(0L, (const Bytef *)&bhdr, bhdr.header_size);
+            pwrite(fd, entries_buf, entries_bytes, (off_t)(bhdr.part_entries_lba * lba_size));
+            pwrite(fd, &bhdr, sizeof(bhdr), (off_t)(hdr.backup_lba * lba_size));
+        }
+        fsync(fd);
+    }
+
+    printf("Disk: %s (LBA=%zuB)\n", disk_path, lba_size);
+    printf("  Slot A (Android / vbmeta_a): %016llx\n", (unsigned long long)cur_vba);
+    printf("  Slot B (Linux   / vbmeta_b): %016llx\n", (unsigned long long)cur_vbb);
+
+    free(entries_buf);
+    close(fd);
+
+#ifdef __linux__
+    if (write_changes && do_reboot) {
+        sync();
+        execl("/usr/bin/systemctl", "systemctl", "reboot", (char *)NULL);
+        execl("/sbin/reboot", "reboot", "-f", (char *)NULL);
+    }
+#endif
+    return 0;
 }
 
 /* Minimal zlib PNG writer for `--preview <output.png>` */
@@ -741,6 +902,9 @@ int main(int argc, char **argv) {
     const char *theme_path = "/boot/googlebook-theme/theme.conf";
     const char *preview_png = NULL;
     const char *entries_file = NULL;
+    const char *slot_mode = NULL;
+    const char *disk_path = "/dev/nvme0n1";
+    bool slot_reboot = false;
     bool modal_preview = false;
 
     for (int i = 1; i < argc; i++) {
@@ -748,6 +912,13 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--preview") == 0 && i + 1 < argc) preview_png = argv[++i];
         else if (strcmp(argv[i], "--entries") == 0 && i + 1 < argc) entries_file = argv[++i];
         else if (strcmp(argv[i], "--preview-luks") == 0) modal_preview = true;
+        else if (strcmp(argv[i], "--switch-slot") == 0 && i + 1 < argc) slot_mode = argv[++i];
+        else if (strcmp(argv[i], "--disk") == 0 && i + 1 < argc) disk_path = argv[++i];
+        else if (strcmp(argv[i], "--reboot") == 0) slot_reboot = true;
+    }
+
+    if (slot_mode) {
+        return gpt_switch_slot(disk_path, slot_mode, slot_reboot);
     }
 
     theme_config_t theme;
@@ -865,7 +1036,7 @@ int main(int argc, char **argv) {
     }
 
     int selected = 0, remaining = theme.timeout_sec;
-    bool timer_active = (theme.timeout_sec > 0), luks_modal = false, shift_down = false;
+    bool timer_active = (theme.timeout_sec > 0), luks_modal = false, shift_down = false, caps_lock = false;
     char luks_pass[128] = {0}, status_msg[256] = {0};
     time_t last_tick = time(NULL);
 
@@ -901,46 +1072,79 @@ int main(int argc, char **argv) {
                         shift_down = (ev.value != 0);
                         continue;
                     }
+                    if (ev.code == KEY_CAPSLOCK && ev.value == 1) {
+                        caps_lock = !caps_lock;
+                        continue;
+                    }
                     if (ev.value != 1 && ev.value != 2) continue;
                     timer_active = false;
                     if (!luks_modal) {
+                        status_msg[0] = '\0';
                         if (ev.code == KEY_LEFT || ev.code == KEY_UP) selected = (selected - 1 + count) % count;
                         else if (ev.code == KEY_RIGHT || ev.code == KEY_DOWN || ev.code == KEY_TAB) selected = (selected + 1) % count;
                         else if (ev.code >= KEY_1 && ev.code <= KEY_9) { int idx = ev.code - KEY_1; if (idx < count) selected = idx; }
                         else if (ev.code == KEY_R) { count = load_boot_entries(entries, MAX_ENTRIES, entries_file); }
-                        else if (ev.code == KEY_ENTER) {
-                            if (entries[selected].needs_luks) { luks_modal = true; luks_pass[0] = '\0'; }
+                        else if (ev.code == KEY_ENTER || ev.code == KEY_KPENTER) {
+                            if (entries[selected].needs_luks) { luks_modal = true; luks_pass[0] = '\0'; status_msg[0] = '\0'; }
                             else goto do_boot;
                         } else if (ev.code == KEY_ESC) return 0;
                     } else {
-                        if (ev.code == KEY_ESC) { luks_modal = false; luks_pass[0] = '\0'; }
+                        if (ev.code == KEY_ESC) { luks_modal = false; luks_pass[0] = '\0'; status_msg[0] = '\0'; }
                         else if (ev.code == KEY_BACKSPACE) { size_t l = strlen(luks_pass); if (l > 0) luks_pass[l - 1] = '\0'; }
-                        else if (ev.code == KEY_ENTER) goto do_boot;
-                        else {
+                        else if (ev.code == KEY_ENTER || ev.code == KEY_KPENTER) {
+                            snprintf(status_msg, sizeof(status_msg), "UNLOCKING LUKS2 VOLUME - PLEASE WAIT...");
+                            render_ui(&cv, &theme, entries, count, selected,
+                                      remaining, timer_active, luks_modal, luks_pass, status_msg);
+                            memcpy(fb_map, cv.pixels, creq.size);
+                            ioctl(drm_fd, DRM_IOCTL_MODE_DIRTYFB, &dirty);
+
+                            setenv("GOOGLEBOOT_LUKS_PASS", luks_pass, 1);
+                            setenv("GOOGLEBOOT_LUKS_DEV", entries[selected].luks_dev, 1);
+                            int urc = system("/usr/local/bin/googleboot-scan --unlock");
+                            if (urc == 0) {
+                                snprintf(status_msg, sizeof(status_msg), "LUKS2 UNLOCKED - LAUNCHING OPERATING SYSTEM...");
+                                render_ui(&cv, &theme, entries, count, selected,
+                                          remaining, timer_active, false, "", status_msg);
+                                memcpy(fb_map, cv.pixels, creq.size);
+                                ioctl(drm_fd, DRM_IOCTL_MODE_DIRTYFB, &dirty);
+                                goto do_boot;
+                            } else {
+                                luks_pass[0] = '\0';
+                                snprintf(status_msg, sizeof(status_msg), "INCORRECT PASSPHRASE - TRY AGAIN (ESC TO CANCEL)");
+                            }
+                        } else {
                             static const char map_norm[64] = {
                                 [KEY_1]='1',[KEY_2]='2',[KEY_3]='3',[KEY_4]='4',[KEY_5]='5',
                                 [KEY_6]='6',[KEY_7]='7',[KEY_8]='8',[KEY_9]='9',[KEY_0]='0',
-                                [KEY_MINUS]='-',[KEY_EQUAL]='=',
+                                [KEY_MINUS]='-',[KEY_EQUAL]='=',[KEY_GRAVE]='`',
                                 [KEY_Q]='q',[KEY_W]='w',[KEY_E]='e',[KEY_R]='r',[KEY_T]='t',
                                 [KEY_Y]='y',[KEY_U]='u',[KEY_I]='i',[KEY_O]='o',[KEY_P]='p',
+                                [KEY_LEFTBRACE]='[',[KEY_RIGHTBRACE]=']',[KEY_BACKSLASH]='\\',
                                 [KEY_A]='a',[KEY_S]='s',[KEY_D]='d',[KEY_F]='f',[KEY_G]='g',
                                 [KEY_H]='h',[KEY_J]='j',[KEY_K]='k',[KEY_L]='l',
+                                [KEY_SEMICOLON]=';',[KEY_APOSTROPHE]='\'',
                                 [KEY_Z]='z',[KEY_X]='x',[KEY_C]='c',[KEY_V]='v',[KEY_B]='b',
-                                [KEY_N]='n',[KEY_M]='m',[KEY_DOT]='.',[KEY_SLASH]='/',[KEY_SPACE]=' '
+                                [KEY_N]='n',[KEY_M]='m',[KEY_COMMA]=',',[KEY_DOT]='.',[KEY_SLASH]='/',[KEY_SPACE]=' '
                             };
                             static const char map_shift[64] = {
                                 [KEY_1]='!',[KEY_2]='@',[KEY_3]='#',[KEY_4]='$',[KEY_5]='%',
                                 [KEY_6]='^',[KEY_7]='&',[KEY_8]='*',[KEY_9]='(',[KEY_0]=')',
-                                [KEY_MINUS]='_',[KEY_EQUAL]='+',
+                                [KEY_MINUS]='_',[KEY_EQUAL]='+',[KEY_GRAVE]='~',
                                 [KEY_Q]='Q',[KEY_W]='W',[KEY_E]='E',[KEY_R]='R',[KEY_T]='T',
                                 [KEY_Y]='Y',[KEY_U]='U',[KEY_I]='I',[KEY_O]='O',[KEY_P]='P',
+                                [KEY_LEFTBRACE]='{',[KEY_RIGHTBRACE]='}',[KEY_BACKSLASH]='|',
                                 [KEY_A]='A',[KEY_S]='S',[KEY_D]='D',[KEY_F]='F',[KEY_G]='G',
                                 [KEY_H]='H',[KEY_J]='J',[KEY_K]='K',[KEY_L]='L',
+                                [KEY_SEMICOLON]=':',[KEY_APOSTROPHE]='"',
                                 [KEY_Z]='Z',[KEY_X]='X',[KEY_C]='C',[KEY_V]='V',[KEY_B]='B',
-                                [KEY_N]='N',[KEY_M]='M',[KEY_DOT]='>',[KEY_SLASH]='?',[KEY_SPACE]=' '
+                                [KEY_N]='N',[KEY_M]='M',[KEY_COMMA]='<',[KEY_DOT]='>',[KEY_SLASH]='?',[KEY_SPACE]=' '
                             };
                             if (ev.code < 64) {
                                 char ch = shift_down ? map_shift[ev.code] : map_norm[ev.code];
+                                if (caps_lock) {
+                                    if (ch >= 'a' && ch <= 'z') ch -= 32;
+                                    else if (ch >= 'A' && ch <= 'Z') ch += 32;
+                                }
                                 size_t l = strlen(luks_pass);
                                 if (ch && l + 1 < sizeof(luks_pass)) {
                                     luks_pass[l] = ch;

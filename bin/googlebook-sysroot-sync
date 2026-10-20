@@ -172,7 +172,15 @@ ENVBOOTEOF
   if [ -d "$R/etc/systemd/user" ] && [ -d /usr/share/omarchy-seed/etc/systemd/user ]; then
     cp -rf /usr/share/omarchy-seed/etc/systemd/user/. "$R/etc/systemd/user/" 2>/dev/null || true
   fi
-  mkdir -p "$R/etc/keyd"
+  mkdir -p "$R/etc/keyd" "$R/etc/udev/hwdb.d"
+  cat > "$R/etc/udev/hwdb.d/61-googlebook-moonstone.hwdb" << 'HWDBEOF'
+evdev:atkbd:dmi:bvn*:bvr*:bd*:svnGoogle:pnMoonstone*
+ KEYBOARD_KEY_91=f11
+ KEYBOARD_KEY_9b=f20
+ KEYBOARD_KEY_a7=playpause
+ KEYBOARD_KEY_a9=prog1
+HWDBEOF
+  chroot "$R" systemd-hwdb update 2>/dev/null || true
   cat > "$R/etc/keyd/cros.conf" << 'KEYDEOF'
 [ids]
 0001:0001

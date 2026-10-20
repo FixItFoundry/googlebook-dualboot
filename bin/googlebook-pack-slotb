@@ -1,11 +1,11 @@
 #!/bin/bash
-# fedomakase-googlebook-slotb
-# Packs the installed Fedomakase kernel + dracut initramfs into the Googlebook's
+# googlebook-pack-slotb
+# Packs the installed Linux kernel + initramfs into the Googlebook's
 # Android Slot B (boot_b / init_boot_b / vendor_boot_b) on the disk that holds "/".
 # depthcharge (coreboot payload) boots Slot B directly; no GRUB/UEFI involved.
 #
-# Usage: fedomakase-googlebook-slotb [kernel-version] [target-disk]
-#   Called from kickstart %post and from /etc/kernel/install.d on kernel updates.
+# Usage: googlebook-pack-slotb [kernel-version] [target-disk]
+#   Called after OS install and from /etc/kernel/install.d on kernel updates.
 set -euo pipefail
 
 log() { echo "[googlebook-slotb] $*"; }
@@ -16,6 +16,7 @@ if [[ -z "$KVER" ]]; then
 fi
 VMLINUZ="/lib/modules/$KVER/vmlinuz"
 [[ -f "$VMLINUZ" ]] || VMLINUZ="/boot/vmlinuz-$KVER"
+[[ -f "$VMLINUZ" ]] || VMLINUZ="/boot/vmlinuz-linux"
 [[ -f "$VMLINUZ" ]] || { log "no kernel image for $KVER"; exit 1; }
 
 DISK="${2:-}"
@@ -44,17 +45,18 @@ fi
 log "kernel $KVER  disk $DISK"
 log "targets: $BOOT_B $INIT_B $VEND_B"
 
-export PATH="/usr/share/omarchy/bin:/usr/local/bin:$PATH"
+SELF_DIR="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd || true)"
+export PATH="$SELF_DIR/bin:/usr/local/bin:$PATH"
 command -v mkbootimg >/dev/null || dnf install -y android-tools >/dev/null 2>&1 || true
 command -v mkbootimg >/dev/null || { log "mkbootimg unavailable"; exit 1; }
 
 # --- ensure coreboot_table.ko & framebuffer-coreboot.ko are installed for $KVER ---
 mkdir -p "/lib/modules/$KVER/extra"
-if [[ -d "/usr/share/omarchy/install/hardware/modules/$KVER" ]]; then
-  cp -f "/usr/share/omarchy/install/hardware/modules/$KVER"/*.ko "/lib/modules/$KVER/extra/" 2>/dev/null || true
-elif [[ -d "/usr/share/omarchy/install/hardware/coreboot-mods" && -d "/lib/modules/$KVER/build" ]]; then
+if [[ -d "$SELF_DIR/coreboot-mods/prebuilt/$KVER" ]]; then
+  cp -f "$SELF_DIR/coreboot-mods/prebuilt/$KVER"/*.ko "/lib/modules/$KVER/extra/" 2>/dev/null || true
+elif [[ -d "$SELF_DIR/coreboot-mods" && -d "/lib/modules/$KVER/build" ]]; then
   CB_BUILD=$(mktemp -d)
-  cp -rf /usr/share/omarchy/install/hardware/coreboot-mods/* "$CB_BUILD/"
+  cp -rf "$SELF_DIR/coreboot-mods"/* "$CB_BUILD/"
   make -C "/lib/modules/$KVER/build" M="$CB_BUILD" modules >/dev/null 2>&1 || true
   cp -f "$CB_BUILD"/*.ko "/lib/modules/$KVER/extra/" 2>/dev/null || true
   rm -rf "$CB_BUILD"
@@ -111,10 +113,8 @@ mkdir -p "$W/unpacked" "$W/split_init/usr/lib"
 rm -rf "$W/unpacked/usr/lib/firmware"/{xe,i915,amdgpu,radeon,nvidia,cxgb4,LENOVO,dell,HP} 2>/dev/null || true
 mv "$W/unpacked/usr/lib/modules" "$W/split_init/usr/lib/modules"
 
-SELF_DIR="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd || true)"
 for menu_installer in \
   "$SELF_DIR/googleboot-menu/scripts/install-into-initramfs.sh" \
-  "/usr/share/omarchy/googleboot-menu/scripts/install-into-initramfs.sh" \
   "/usr/local/share/googleboot-menu/scripts/install-into-initramfs.sh"; do
   if [[ -x "$menu_installer" ]]; then
     "$menu_installer" "$W/unpacked"
@@ -124,7 +124,6 @@ done
 
 for sync_script in \
   "$SELF_DIR/bin/googlebook-sysroot-sync" \
-  "/usr/share/omarchy/bin/googlebook-sysroot-sync" \
   "/usr/local/bin/googlebook-sysroot-sync" \
   "/usr/bin/googlebook-sysroot-sync"; do
   if [[ -f "$sync_script" ]]; then
@@ -136,7 +135,7 @@ for sync_script in \
     chmod 755 "$W/unpacked/usr/bin/googlebook-sysroot-sync" "$W/unpacked/usr/local/bin/googlebook-sysroot-sync"
     cat > "$W/unpacked/etc/systemd/system/googlebook-sysroot-sync.service" << 'SYNCSVCEOF'
 [Unit]
-Description=GoogleBook Moonstone Sysroot Module & Omarchy Sync
+Description=GoogleBook Moonstone Sysroot Hardware & Module Sync
 DefaultDependencies=no
 After=initrd-root-fs.target sysroot.mount
 Before=initrd-switch-root.target
@@ -164,7 +163,7 @@ log "rd_vendor: $VSZ bytes (limit $VEND_MAX), rd_init: $ISZ bytes (limit $INIT_M
 (( VSZ <= VEND_MAX )) || { log "rd_vendor too large ($VSZ > $VEND_MAX)"; exit 1; }
 (( ISZ <= INIT_MAX )) || { log "rd_init too large ($ISZ > $INIT_MAX)"; exit 1; }
 
-printf 'androidboot.fedomakase=1\n' > "$W/bootconfig"
+printf 'androidboot.googleboot=1\n' > "$W/bootconfig"
 
 mkbootimg --header_version 4 --kernel "$VMLINUZ" --cmdline "" \
   --os_version 17.0.0 --os_patch_level 2026-09 -o "$W/boot_b.img"
@@ -187,14 +186,14 @@ for pair in "boot_b.img:$BOOT_B" "init_boot_b.img:$INIT_B" "vendor_boot_b.img:$V
 done
 
 # kernel-install hook so every kernel update refreshes Slot B
-HOOK=/etc/kernel/install.d/95-fedomakase-googlebook-slotb.install
+HOOK=/etc/kernel/install.d/95-googlebook-slotb.install
 if [[ ! -f "$HOOK" ]]; then
   mkdir -p /etc/kernel/install.d
   cat > "$HOOK" <<'EOF'
 #!/bin/sh
 # Refresh Googlebook Slot B (depthcharge) on kernel install
 [ "$1" = "add" ] || exit 0
-/usr/share/omarchy/bin/fedomakase-googlebook-slotb "$2" || true
+/usr/local/bin/googlebook-pack-slotb "$2" || true
 EOF
   chmod +x "$HOOK"
 fi

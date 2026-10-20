@@ -1,24 +1,24 @@
 #!/bin/bash
 # build-slotb-installer.sh
 # Builds Depthcharge/Android v4 Slot B boot images (boot_b.img, init_boot_b.img, vendor_boot_b.img)
-# for the Acer Googlebook 14 (Moonstone) from a Fedomakase ISO directory.
+# for the Acer Googlebook 14 (Moonstone) from an extracted Linux installer ISO directory.
 #
 # Key features:
 #   1. Injects coreboot_table.ko and framebuffer-coreboot.ko for the 2880x1800 OLED display (simpledrm).
-#   2. Injects patched omarchy-installer.sh (controlling TTY fix on /dev/tty3 + Googlebook p11/p32 layout).
-#   3. Prunes bulky GPU/NIC firmware from initramfs and splits into two independent .cpio.zst archives
+#   2. Prunes bulky GPU/NIC firmware from initramfs and splits into two independent .cpio.zst archives
 #      (rd_vendor.img <= 32 MiB + rd_init.img <= 8 MiB) so Depthcharge page padding never corrupts zstd.
 #
 # Usage:
-#   ./build-slotb-installer.sh <extracted-iso-dir> <output-dir> <http-server-url> [coreboot-mods-dir]
+#   ./build-slotb-installer.sh <extracted-iso-dir> <output-dir> <http-server-url> [coreboot-mods-dir] [extra-cmdline]
 # Example:
-#   ./build-slotb-installer.sh ./iso-extracted ./slotb-installer http://192.168.8.11:8080 ./coreboot-mods/6.19.10-300.fc44.x86_64
+#   ./build-slotb-installer.sh ./iso-extracted ./slotb-installer http://192.168.8.11:8080 ./coreboot-mods/prebuilt/6.19.10-300.fc44.x86_64
 set -euo pipefail
 
 ISO_DIR="${1:-}"
 OUT_DIR="${2:-./slotb-installer}"
 HTTP_URL="${3:-http://192.168.8.11:8080}"
 MODS_DIR="${4:-}"
+EXTRA_CMDLINE="${5:-}"
 
 if [[ -z "$ISO_DIR" || ! -f "$ISO_DIR/images/pxeboot/vmlinuz" || ! -f "$ISO_DIR/images/pxeboot/initrd.img" ]]; then
   echo "Usage: $0 <extracted-iso-dir> <output-dir> <http-server-url> [coreboot-mods-dir]" >&2
@@ -64,8 +64,8 @@ echo "      rd_vendor.img: $VSZ bytes (limit 33488896)"
 echo "      rd_init.img  : $ISZ bytes (limit 8380416)"
 
 echo "[4/4] Packing boot_b.img, init_boot_b.img, and vendor_boot_b.img..."
-printf 'androidboot.fedomakase=1\n' > "$WORK/bootconfig"
-CMDLINE="inst.stage2=${HTTP_URL} inst.ks=${HTTP_URL}/omarchy-ks.cfg inst.text inst.sshd rd.driver.pre=coreboot_table,framebuffer-coreboot clk_ignore_unused modprobe.blacklist=i915,xe console=tty0 bootconfig"
+printf 'androidboot.googleboot=1\n' > "$WORK/bootconfig"
+CMDLINE="inst.stage2=${HTTP_URL} inst.text inst.sshd rd.driver.pre=coreboot_table,framebuffer-coreboot clk_ignore_unused modprobe.blacklist=i915,xe console=tty0 bootconfig ${EXTRA_CMDLINE}"
 
 "$MKBOOTIMG" --header_version 4 --kernel "$ISO_DIR/images/pxeboot/vmlinuz" --cmdline "" \
   --os_version 17.0.0 --os_patch_level 2026-09 -o "$OUT_DIR/boot_b.img"

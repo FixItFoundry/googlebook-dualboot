@@ -1,94 +1,16 @@
 #!/bin/sh
 # googlebook-sysroot-sync
-# Runs in the Slot B initramfs after /sysroot is mounted (Before=initrd-switch-root.target).
-# Uses pure POSIX shell constructs (zero dependency on awk in minimal initramfs) and adds
-# /sysroot/usr/bin:/sysroot/usr/sbin to PATH.
-# Syncs Googlebook Moonstone hardware modules, Slot A/B switch tools, SSH access,
-# SELinux permissive mode, user/root PAM password state, 2s GBB bootloader delay flag,
-# and self-heals Fedomakase (Omarchy Quattro + Hyprland + SDDM + UWSM).
+# Distro-agnostic Slot B initramfs hook that runs after /sysroot is mounted
+# (Before=initrd-switch-root.target).
+# Syncs Acer Googlebook 14 (Moonstone) Coreboot framebuffer modules, Intel
+# Panther Lake Xe2 staged GPU load rules, Vivaldi top-row action key hwdb/keyd
+# mappings, and Slot A/B switch tools into the target Linux rootfs (/sysroot).
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/sysroot/usr/sbin:/sysroot/usr/bin"
 
 mount -o remount,rw /sysroot 2>/dev/null || true
 
-# 1. Locate /sysroot backing block device without awk & mount Btrfs subvol=home at /sysroot/home
-HOME_MOUNTED_BY_SYNC=0
-ROOT_DEV=""
-while IFS=' ' read -r m_dev m_mp _rest; do
-  if [ "$m_mp" = "/sysroot" ]; then
-    ROOT_DEV="$m_dev"
-    break
-  fi
-done < /proc/mounts
-
-if [ -z "$ROOT_DEV" ]; then
-  for d in /dev/mapper/luks-*; do
-    [ -b "$d" ] && { ROOT_DEV="$d"; break; }
-  done
-fi
-
-HOME_ALREADY_MOUNTED=0
-while IFS=' ' read -r _dev m_mp _rest; do
-  if [ "$m_mp" = "/sysroot/home" ]; then
-    HOME_ALREADY_MOUNTED=1
-    break
-  fi
-done < /proc/mounts
-
-if [ -n "$ROOT_DEV" ] && [ "$HOME_ALREADY_MOUNTED" = "0" ]; then
-  mkdir -p /sysroot/home
-  if mount -t btrfs -o subvol=home "$ROOT_DEV" /sysroot/home 2>/dev/null; then
-    HOME_MOUNTED_BY_SYNC=1
-  fi
-fi
-
-# 2. Detect primary human user (UID >= 1000 && UID < 60000) using pure POSIX read (no awk needed)
-PRIMARY_USER=""
-if [ -f /sysroot/etc/passwd ]; then
-  while IFS=: read -r p_user _pw p_uid _gid _gecos _home _shell; do
-    case "$p_uid" in
-      ''|*[!0-9]*) continue ;;
-    esac
-    if [ "$p_uid" -ge 1000 ] && [ "$p_uid" -lt 60000 ] && [ "$p_user" != "nobody" ] && [ "$p_user" != "nfsnobody" ]; then
-      PRIMARY_USER="$p_user"
-      break
-    fi
-  done < /sysroot/etc/passwd
-fi
-if [ -z "$PRIMARY_USER" ]; then
-  for d in /sysroot/home/*; do
-    [ -d "$d" ] || continue
-    bn="${d##*/}"
-    [ "$bn" = "lost+found" ] && continue
-    PRIMARY_USER="$bn"
-    break
-  done
-fi
-[ -z "$PRIMARY_USER" ] && PRIMARY_USER="jcasco"
-
-get_uid_gid() {
-  target_u="$1"
-  passwd_file="$2"
-  res_ug=""
-  if [ -f "$passwd_file" ]; then
-    while IFS=: read -r p_user _pw p_uid p_gid _rest; do
-      if [ "$p_user" = "$target_u" ]; then
-        res_ug="${p_uid}:${p_gid}"
-        break
-      fi
-    done < "$passwd_file"
-  fi
-  [ -z "$res_ug" ] && res_ug="1000:1000"
-  echo "$res_ug"
-}
-
-# 3. Ensure SELinux is permissive so unlabeled initramfs-synced files (/etc/shadow, SDDM, ~/.config)
-#    never cause PAM (unix_chkpwd) or SDDM to reject the user's password!
-if [ -f /sysroot/etc/selinux/config ]; then
-  sed -i 's/^SELINUX=enforcing/SELINUX=permissive/' /sysroot/etc/selinux/config 2>/dev/null || true
-fi
-
-# 4. Install coreboot framebuffer modules & GPU staging rules into /sysroot
+# 1. Install coreboot framebuffer modules & GPU staging rules into /sysroot
 KVER=$(uname -r)
 if [ -d "/sysroot/lib/modules/$KVER" ]; then
   mkdir -p "/sysroot/lib/modules/$KVER/extra"
@@ -106,7 +28,7 @@ options xe gsc_firmware_path="" huc_firmware_path="" wedged_mode=0 enable_psr=0
 options spi_intel_pci writeable=1
 XEEOF
 
-# 5. Install Googlebook Slot A/B switch utility, googleboot-menu binary, udev rules, and sudoers
+# 2. Install Googlebook Slot A/B switch utility, googleboot-menu binary, udev rules, and sudoers
 mkdir -p /sysroot/usr/local/bin /sysroot/usr/local/sbin /sysroot/etc/udev/rules.d /sysroot/etc/sudoers.d
 for bin_name in googlebook-switch-slot googleboot-menu googleboot-scan; do
   if [ -f "/usr/local/bin/$bin_name" ]; then
@@ -125,63 +47,18 @@ cat > /sysroot/etc/sudoers.d/googlebook-slotb << 'SUDOEOF'
 SUDOEOF
 chmod 0440 /sysroot/etc/sudoers.d/googlebook-slotb
 
-# 6. Self-heal Omarchy Quattro system & user configuration on /sysroot
-repair_omarchy_tree() {
-  R="$1"
-  if [ ! -f "$R/usr/share/omarchy/default/hypr/bootstrap.lua" ] && [ -d /usr/share/omarchy-seed ]; then
-    mkdir -p "$R/usr/share/omarchy"
-    cp -a /usr/share/omarchy-seed/. "$R/usr/share/omarchy/" 2>/dev/null || true
-    if [ -d /usr/share/omarchy-seed/etc ]; then
-      cp -rn /usr/share/omarchy-seed/etc/* "$R/etc/" 2>/dev/null || true
-      cp -rf /usr/share/omarchy-seed/etc/sddm.conf.d "$R/etc/" 2>/dev/null || true
-    fi
-  fi
-  [ -d "$R/usr/share/omarchy" ] || return 0
-
-  chmod +x "$R/usr/share/omarchy/bin/"* "$R/usr/share/omarchy/installer/"* 2>/dev/null || true
-  mkdir -p "$R/usr/bin" "$R/usr/local/bin"
-  for f in "$R/usr/share/omarchy/bin/"*; do
-    [ -f "$f" ] || continue
-    bn="${f##*/}"
-    ln -sf "/usr/share/omarchy/bin/$bn" "$R/usr/bin/$bn"
-    ln -sf "/usr/share/omarchy/bin/$bn" "$R/usr/local/bin/$bn"
-  done
-
-  if [ -f "$R/usr/share/omarchy/default/bash/env-bootstrap" ]; then
-    cat > "$R/usr/share/omarchy/default/bash/env-bootstrap" << 'ENVBOOTEOF'
-# System-wide Omarchy environment bootstrap.
-export OMARCHY_PATH="${OMARCHY_PATH:-/usr/share/omarchy}"
-case ":$PATH:" in
-  *":${OMARCHY_PATH%/}/bin:"*) ;;
-  *) export PATH="${OMARCHY_PATH%/}/bin:$PATH" ;;
-esac
-case ":$PATH:" in
-  *":$HOME/.local/bin:"*) ;;
-  *) [ -n "${HOME:-}" ] && export PATH="$HOME/.local/bin:$PATH" ;;
-esac
-ENVBOOTEOF
-    chmod 644 "$R/usr/share/omarchy/default/bash/env-bootstrap"
-    mkdir -p "$R/etc/profile.d"
-    ln -sf /usr/share/omarchy/default/bash/env-bootstrap "$R/etc/profile.d/omarchy.sh"
-  fi
-
-  mkdir -p "$R/usr/share/uwsm/env.d" "$R/usr/share/uwsm/modules"
-  if [ -d /usr/share/omarchy-seed/uwsm-xdg ] && [ ! -d "$R/usr/lib/python3.14/site-packages/xdg" ]; then
-    cp -rf /usr/share/omarchy-seed/uwsm-xdg "$R/usr/share/uwsm/modules/xdg" 2>/dev/null || true
-  fi
-  if [ -d "$R/etc/systemd/user" ] && [ -d /usr/share/omarchy-seed/etc/systemd/user ]; then
-    cp -rf /usr/share/omarchy-seed/etc/systemd/user/. "$R/etc/systemd/user/" 2>/dev/null || true
-  fi
-  mkdir -p "$R/etc/keyd" "$R/etc/udev/hwdb.d"
-  cat > "$R/etc/udev/hwdb.d/61-googlebook-moonstone.hwdb" << 'HWDBEOF'
+# 3. Install Moonstone Vivaldi top-row keyboard hwdb and keyd mappings
+mkdir -p /sysroot/etc/keyd /sysroot/etc/udev/hwdb.d
+cat > /sysroot/etc/udev/hwdb.d/61-googlebook-moonstone.hwdb << 'HWDBEOF'
 evdev:atkbd:dmi:bvn*:bvr*:bd*:svnGoogle:pnMoonstone*
  KEYBOARD_KEY_91=f11
  KEYBOARD_KEY_9b=f20
  KEYBOARD_KEY_a7=playpause
  KEYBOARD_KEY_a9=prog1
 HWDBEOF
-  chroot "$R" systemd-hwdb update 2>/dev/null || true
-  cat > "$R/etc/keyd/cros.conf" << 'KEYDEOF'
+chroot /sysroot systemd-hwdb update 2>/dev/null || true
+
+cat > /sysroot/etc/keyd/cros.conf << 'KEYDEOF'
 [ids]
 0001:0001
 18d1:*
@@ -206,220 +83,14 @@ mute = f10
 volumedown = f11
 volumeup = f12
 KEYDEOF
-  if [ -f "$R/usr/share/omarchy/default/uwsm/default" ]; then
-    cp -f "$R/usr/share/omarchy/default/uwsm/default" "$R/usr/share/uwsm/default"
-  else
-    cat > "$R/usr/share/uwsm/default" << 'UWSMEOF'
-export OMARCHY_PATH=/usr/share/omarchy
-export PATH=$OMARCHY_PATH/bin:$PATH:$HOME/.local/bin
-export TERMINAL=xdg-terminal-exec
-UWSMEOF
-  fi
-  cat > "$R/usr/share/uwsm/env.d/10-omarchy" << 'UWSMENVEOF'
-# Preload Omarchy session runtime defaults into the uwsm environment.
-[ -r /usr/share/omarchy/default/bash/env-bootstrap ] && . /usr/share/omarchy/default/bash/env-bootstrap
-[ -r /usr/share/omarchy/default/uwsm/default ] && . /usr/share/omarchy/default/uwsm/default
 
-if command -v omarchy-Runtime-env >/dev/null 2>&1; then
-  eval "$(omarchy-Runtime-env)" || true
-fi
-
-if command -v omarchy-cmd-present >/dev/null 2>&1 && omarchy-cmd-present mise; then
-  eval "$(mise activate bash --shims)" || true
-fi
-true
-UWSMENVEOF
-  chmod 644 "$R/usr/share/uwsm/default" "$R/usr/share/uwsm/env.d/10-omarchy"
-
-  if [ -d "$R/usr/share/omarchy/default/environment.d" ]; then
-    mkdir -p "$R/usr/lib/environment.d"
-    cp -f "$R/usr/share/omarchy/default/environment.d/"*.conf "$R/usr/lib/environment.d/" 2>/dev/null || true
-  fi
-
-  mkdir -p "$R/usr/share/sddm/themes"
-  if [ -f "$R/usr/share/omarchy/default/sddm/hyprland.lua" ]; then
-    cp -f "$R/usr/share/omarchy/default/sddm/hyprland.lua" "$R/usr/share/sddm/hyprland.lua"
-    chmod 644 "$R/usr/share/sddm/hyprland.lua"
-  fi
-  if [ -d "$R/usr/share/omarchy/default/sddm/omarchy" ]; then
-    cp -rf "$R/usr/share/omarchy/default/sddm/omarchy" "$R/usr/share/sddm/themes/"
-  fi
-  rm -rf "$R/var/lib/sddm/.config/hypr" 2>/dev/null || true
-
-  if [ -d "$R/usr/share/omarchy/default/wayland-sessions" ]; then
-    mkdir -p "$R/usr/share/wayland-sessions"
-    cp -rf "$R/usr/share/omarchy/default/wayland-sessions/." "$R/usr/share/wayland-sessions/"
-    rm -f "$R/usr/share/wayland-sessions/hyprland-uwsm.desktop" 2>/dev/null || true
-  fi
-
-  if [ -f "$R/usr/share/omarchy/bin/omarchy-apply-fedora-patches" ]; then
-    sed -i 's|CompositorCommand=uwsm start -e -D Hyprland hyprland.desktop|CompositorCommand=start-hyprland -- --config /usr/share/sddm/hyprland.lua|g' "$R/usr/share/omarchy/bin/omarchy-apply-fedora-patches" 2>/dev/null || true
-    sed -i 's|CompositorCommand=Hyprland --config /usr/share/sddm/hyprland.lua|CompositorCommand=start-hyprland -- --config /usr/share/sddm/hyprland.lua|g' "$R/usr/share/omarchy/bin/omarchy-apply-fedora-patches" 2>/dev/null || true
-    sed -i 's|grep -q "uwsm start" "\$sddm_wayland"|grep -q "/usr/share/sddm/hyprland.lua" "\$sddm_wayland"|g' "$R/usr/share/omarchy/bin/omarchy-apply-fedora-patches" 2>/dev/null || true
-  fi
-
-  if [ -f "$R/usr/share/omarchy/install/user/mise-work.sh" ]; then
-    sed -i 's/exit 1/echo "Warning: Node.js tarball not bundled; skipping offline Node install" >\&2/' "$R/usr/share/omarchy/install/user/mise-work.sh" 2>/dev/null || true
-  fi
-  if [ -f "$R/usr/share/omarchy/install/user/mise.sh" ]; then
-    sed -i 's/\(omarchy-mise-install .*\)/\1 || true/' "$R/usr/share/omarchy/install/user/mise.sh" 2>/dev/null || true
-    sed -i 's/^mise reshim$/mise reshim || true/' "$R/usr/share/omarchy/install/user/mise.sh" 2>/dev/null || true
-  fi
-
-  mkdir -p "$R/etc/sddm.conf.d" "$R/var/lib/sddm"
-  cat > "$R/etc/sddm.conf.d/10-wayland.conf" << 'WLEOF'
-[General]
-DisplayServer=wayland
-
-[Wayland]
-CompositorCommand=start-hyprland -- --config /usr/share/sddm/hyprland.lua
-SessionDir=/usr/share/wayland-sessions
-
-[Theme]
-Current=omarchy
-WLEOF
-
-  cat > "$R/etc/sddm.conf.d/autologin.conf" << AUTOEOF
-[Autologin]
-User=${PRIMARY_USER}
-Session=omarchy.desktop
-Relogin=false
-AUTOEOF
-  cp -f "$R/etc/sddm.conf.d/autologin.conf" "$R/etc/sddm.conf.d/omarchy.conf" 2>/dev/null || true
-
-  cat > "$R/var/lib/sddm/state.conf" << STATEEOF
-[Last]
-User=${PRIMARY_USER}
-Session=/usr/share/wayland-sessions/omarchy.desktop
-STATEEOF
-
-  mkdir -p "$R/etc/skel/.config/omarchy/branding" \
-           "$R/etc/skel/.config/autostart" \
-           "$R/etc/skel/.local/state/omarchy/toggles/hypr" \
-           "$R/etc/skel/.local/state/tensaku" \
-           "$R/etc/skel/.local/share/nautilus-python/extensions"
-  cp -rf "$R/usr/share/omarchy/config/." "$R/etc/skel/.config/" 2>/dev/null || true
-  cp -f "$R/usr/share/omarchy/default/bashrc" "$R/etc/skel/.bashrc" 2>/dev/null || true
-  cp -f "$R/usr/share/omarchy/logo.txt" "$R/etc/skel/.config/omarchy/branding/screensaver.txt" 2>/dev/null || true
-  cp -f "$R/usr/share/omarchy/logo.txt" "$R/etc/skel/.config/omarchy/branding/about.txt" 2>/dev/null || true
-  cp -f "$R/usr/share/omarchy/default/hypr/toggles/flags.lua" "$R/etc/skel/.local/state/omarchy/toggles/hypr/flags.lua" 2>/dev/null || true
-  cp -f "$R/usr/share/omarchy/default/tensaku/state.toml" "$R/etc/skel/.local/state/tensaku/state.toml" 2>/dev/null || true
-  cp -f "$R/usr/share/omarchy/default/nautilus-python/extensions/localsend.py" "$R/etc/skel/.local/share/nautilus-python/extensions/localsend.py" 2>/dev/null || true
-  cat > "$R/etc/skel/.config/autostart/omarchy-first-run.desktop" << 'AUTOSTART_EOF'
-[Desktop Entry]
-Type=Application
-Name=Omarchy First Run Setup
-Exec=/usr/share/omarchy/bin/omarchy-provision-first-run
-Hidden=false
-NoDisplay=true
-X-GNOME-Autostart-enabled=true
-AUTOSTART_EOF
-  chmod -R a+rX "$R/etc/skel" 2>/dev/null || true
-
-  # Ensure primary user's home directory exists on /sysroot/home
-  mkdir -p "$R/home/$PRIMARY_USER"
-
-  for user_dir in "$R/home/"*; do
-    [ -d "$user_dir" ] || continue
-    user_name="${user_dir##*/}"
-    [ "$user_name" = "lost+found" ] && continue
-
-    uid_gid=$(get_uid_gid "$user_name" "$R/etc/passwd")
-
-    rm -f "$user_dir/.config/hypr/hyprland.conf" 2>/dev/null || true
-
-    if [ ! -f "$user_dir/.config/hypr/hyprland.lua" ] || \
-       ! grep -q "default/hypr/bootstrap.lua" "$user_dir/.config/hypr/hyprland.lua" 2>/dev/null || \
-       [ ! -f "$user_dir/.config/hypr/autostart.lua" ]; then
-      mkdir -p "$user_dir/.config"
-      cp -rf "$R/usr/share/omarchy/config/." "$user_dir/.config/"
-    fi
-
-    mkdir -p "$user_dir/.config/omarchy/branding" \
-             "$user_dir/.config/autostart" \
-             "$user_dir/.local/state/omarchy/toggles/hypr" \
-             "$user_dir/.local/state/omarchy/migrations" \
-             "$user_dir/.local/state/tensaku" \
-             "$user_dir/.local/share/nautilus-python/extensions" \
-             "$user_dir/.local/share/applications" \
-             "$user_dir/.local/share/icons"
-    if [ ! -f "$user_dir/.bashrc" ] || ! grep -q "omarchy" "$user_dir/.bashrc" 2>/dev/null; then
-      cp -f "$R/usr/share/omarchy/default/bashrc" "$user_dir/.bashrc" 2>/dev/null || true
-    fi
-    [ -f "$user_dir/.config/omarchy/branding/screensaver.txt" ] || cp -f "$R/usr/share/omarchy/logo.txt" "$user_dir/.config/omarchy/branding/screensaver.txt" 2>/dev/null || true
-    [ -f "$user_dir/.config/omarchy/branding/about.txt" ] || cp -f "$R/usr/share/omarchy/logo.txt" "$user_dir/.config/omarchy/branding/about.txt" 2>/dev/null || true
-    [ -f "$user_dir/.local/state/omarchy/toggles/hypr/flags.lua" ] || cp -f "$R/usr/share/omarchy/default/hypr/toggles/flags.lua" "$user_dir/.local/state/omarchy/toggles/hypr/flags.lua" 2>/dev/null || true
-    [ -f "$user_dir/.local/state/tensaku/state.toml" ] || cp -f "$R/usr/share/omarchy/default/tensaku/state.toml" "$user_dir/.local/state/tensaku/state.toml" 2>/dev/null || true
-    [ -f "$user_dir/.local/share/nautilus-python/extensions/localsend.py" ] || cp -f "$R/usr/share/omarchy/default/nautilus-python/extensions/localsend.py" "$user_dir/.local/share/nautilus-python/extensions/localsend.py" 2>/dev/null || true
-    [ -f "$user_dir/.config/autostart/omarchy-first-run.desktop" ] || cp -f "$R/etc/skel/.config/autostart/omarchy-first-run.desktop" "$user_dir/.config/autostart/omarchy-first-run.desktop" 2>/dev/null || true
-
-    if [ -d "$R/usr/share/omarchy/applications" ]; then
-      cp -rf "$R/usr/share/omarchy/applications/"*.desktop "$user_dir/.local/share/applications/" 2>/dev/null || true
-      cp -rf "$R/usr/share/omarchy/applications/icons/." "$user_dir/.local/share/icons/" 2>/dev/null || true
-    fi
-
-    if [ ! -f "$user_dir/.local/state/omarchy/current/theme/hyprland.lua" ] && [ -d "$R/usr/share/omarchy/themes/tokyo-night" ]; then
-      mkdir -p "$user_dir/.local/state/omarchy/current/theme" \
-               "$user_dir/.config/btop/themes" \
-               "$user_dir/.config/mako" \
-               "$user_dir/.config/eza"
-      cp -rf "$R/usr/share/omarchy/themes/tokyo-night/." "$user_dir/.local/state/omarchy/current/theme/"
-      printf 'tokyo-night\n' > "$user_dir/.local/state/omarchy/current/theme.name"
-      first_bg=""
-      for bg_cand in "$user_dir/.local/state/omarchy/current/theme/backgrounds/"*; do
-        [ -f "$bg_cand" ] && { first_bg="$bg_cand"; break; }
-      done
-      if [ -n "$first_bg" ]; then
-        bg_bn="${first_bg##*/}"
-        ln -snf "/home/$user_name/.local/state/omarchy/current/theme/backgrounds/$bg_bn" "$user_dir/.local/state/omarchy/current/background"
-      fi
-      [ -f "$user_dir/.local/state/omarchy/current/theme/btop.theme" ] && cp -f "$user_dir/.local/state/omarchy/current/theme/btop.theme" "$user_dir/.config/btop/themes/current.theme"
-      [ -f "$user_dir/.local/state/omarchy/current/theme/mako.ini" ] && cp -f "$user_dir/.local/state/omarchy/current/theme/mako.ini" "$user_dir/.config/mako/config"
-      [ -f "$user_dir/.local/state/omarchy/current/theme/eza.yml" ] && cp -f "$user_dir/.local/state/omarchy/current/theme/eza.yml" "$user_dir/.config/eza/theme.yml"
-    fi
-
-    if [ -d "$R/usr/share/omarchy/migrations" ]; then
-      for mig in "$R/usr/share/omarchy/migrations/"*.sh; do
-        [ -f "$mig" ] || continue
-        touch "$user_dir/.local/state/omarchy/migrations/${mig##*/}"
-      done
-    fi
-
-    if [ -d "$R/usr/share/omarchy/fedora-patches" ]; then
-      mkdir -p "$user_dir/.local/share/fedomakase/bin" "$user_dir/.local/share/fedomakase/fedora-patches" "$user_dir/.config/omarchy/hooks/post-update.d"
-      cp -f "$R/usr/share/omarchy/bin/omarchy-apply-fedora-patches" "$user_dir/.local/share/fedomakase/bin/" 2>/dev/null || true
-      cp -rf "$R/usr/share/omarchy/fedora-patches/." "$user_dir/.local/share/fedomakase/fedora-patches/" 2>/dev/null || true
-      cp -f "$R/usr/share/omarchy/fedora-patches/apply-fedora-patches.hook" "$user_dir/.config/omarchy/hooks/post-update.d/apply-fedora-patches.hook" 2>/dev/null || true
-      chmod +x "$user_dir/.config/omarchy/hooks/post-update.d/apply-fedora-patches.hook" 2>/dev/null || true
-    fi
-
-    chown -R "$uid_gid" "$user_dir" 2>/dev/null || true
-  done
-}
-
-repair_omarchy_tree /sysroot
-
-# 7. Install googlebook-gpu-init.service to run before sddm.service in the real root
+# 4. Install googlebook-gpu-init.service to load Intel Xe2 driver before display-manager.service
 cat > /sysroot/usr/local/sbin/googlebook-gpu-init << 'GPUEOF'
 #!/bin/sh
-# Ensure simpledrm or xe DRM node is ready, GBB 2s boot delay is set if SPI is writable,
-# and user configs are provisioned before SDDM starts.
 modprobe coreboot_table 2>/dev/null || true
 modprobe framebuffer-coreboot 2>/dev/null || true
-setenforce 0 2>/dev/null || true
-restorecon -F /etc/shadow /etc/passwd /etc/group 2>/dev/null || true
 
-# Attempt to set ChromeOS GBB_FLAG_DEV_SCREEN_SHORT_DELAY (0x1 = 2 second bootloader screen delay)
-modprobe -r mtdblock spi_intel_pci 2>/dev/null || true
-modprobe spi_intel_pci writeable=1 2>/dev/null || modprobe spi_intel_pci 2>/dev/null || true
-modprobe mtdblock 2>/dev/null || true
-if [ -x /usr/local/bin/googleboot-menu ]; then
-  for mtd_dev in /dev/mtdblock0 /dev/mtd0; do
-    [ -e "$mtd_dev" ] && /usr/local/bin/googleboot-menu --set-gbb-short-delay "$mtd_dev" 2>/dev/null && break
-  done
-fi
-
-# Map Moonstone Vivaldi top-row scancodes >247 (0x91 Fullscreen -> 87 F11, 0x9B MicMute -> 190 F20/XF86AudioMicMute, 0xA7 Access -> 164 PlayPause)
+# Map Moonstone Vivaldi top-row scancodes >247 (0x91 Fullscreen -> 87 F11, 0x9B MicMute -> 190 F20, 0xA7 Access -> 164 PlayPause)
 if command -v python3 >/dev/null 2>&1; then
   python3 - << 'PY' 2>/dev/null || true
 import fcntl, glob, struct
@@ -434,53 +105,6 @@ for dev in glob.glob("/dev/input/by-path/*i8042-serio-0-event-kbd"):
 PY
 fi
 
-for user_dir in /home/*; do
-  [ -d "$user_dir" ] || continue
-  user_name="${user_dir##*/}"
-  [ "$user_name" = "lost+found" ] && continue
-  uid_gid="1000:1000"
-  while IFS=: read -r p_u _pw p_uid p_gid _rest; do
-    [ "$p_u" = "$user_name" ] && { uid_gid="${p_uid}:${p_gid}"; break; }
-  done < /etc/passwd
-
-  rm -f "$user_dir/.config/hypr/hyprland.conf" 2>/dev/null || true
-  if [ ! -f "$user_dir/.config/hypr/hyprland.lua" ] || \
-     ! grep -q "default/hypr/bootstrap.lua" "$user_dir/.config/hypr/hyprland.lua" 2>/dev/null || \
-     [ ! -f "$user_dir/.config/hypr/autostart.lua" ]; then
-    if [ -d /usr/share/omarchy/config ]; then
-      mkdir -p "$user_dir/.config"
-      cp -rf /usr/share/omarchy/config/. "$user_dir/.config/"
-      cp -rf /etc/skel/. "$user_dir/" 2>/dev/null || true
-    fi
-  fi
-
-  if [ ! -f "$user_dir/.local/state/omarchy/current/theme/hyprland.lua" ] && [ -d /usr/share/omarchy/themes/tokyo-night ]; then
-    mkdir -p "$user_dir/.local/state/omarchy/current/theme" \
-             "$user_dir/.config/btop/themes" \
-             "$user_dir/.config/mako" \
-             "$user_dir/.config/eza"
-    cp -rf /usr/share/omarchy/themes/tokyo-night/. "$user_dir/.local/state/omarchy/current/theme/"
-    printf 'tokyo-night\n' > "$user_dir/.local/state/omarchy/current/theme.name"
-    first_bg=""
-    for bg_cand in "$user_dir/.local/state/omarchy/current/theme/backgrounds/"*; do
-      [ -f "$bg_cand" ] && { first_bg="$bg_cand"; break; }
-    done
-    if [ -n "$first_bg" ]; then
-      bg_bn="${first_bg##*/}"
-      ln -snf "/home/$user_name/.local/state/omarchy/current/theme/backgrounds/$bg_bn" "$user_dir/.local/state/omarchy/current/background"
-    fi
-    [ -f "$user_dir/.local/state/omarchy/current/theme/btop.theme" ] && cp -f "$user_dir/.local/state/omarchy/current/theme/btop.theme" "$user_dir/.config/btop/themes/current.theme"
-    [ -f "$user_dir/.local/state/omarchy/current/theme/mako.ini" ] && cp -f "$user_dir/.local/state/omarchy/current/theme/mako.ini" "$user_dir/.config/mako/config"
-    [ -f "$user_dir/.local/state/omarchy/current/theme/eza.yml" ] && cp -f "$user_dir/.local/state/omarchy/current/theme/eza.yml" "$user_dir/.config/eza/theme.yml"
-  fi
-
-  chown -R "$uid_gid" "$user_dir" 2>/dev/null || true
-
-  if [ ! -f "$user_dir/.local/state/omarchy/done/finalize-user" ] && [ -x /usr/share/omarchy/bin/omarchy-provision-user ]; then
-    su - "$user_name" -c "OMARCHY_PATH=/usr/share/omarchy OMARCHY_SETUP_CONTEXT=provision-owner PATH=/usr/share/omarchy/bin:/usr/local/bin:/usr/bin /usr/share/omarchy/bin/omarchy-provision-user --force --first-install" 2>/dev/null || true
-  fi
-done
-
 if [ ! -e /dev/dri/renderD128 ]; then
   modprobe xe gsc_firmware_path="" huc_firmware_path="" wedged_mode=0 enable_psr=0 2>/dev/null || true
 fi
@@ -490,9 +114,9 @@ chmod 755 /sysroot/usr/local/sbin/googlebook-gpu-init
 
 cat > /sysroot/etc/systemd/system/googlebook-gpu-init.service << 'SVCEOF'
 [Unit]
-Description=GoogleBook Moonstone Display & Omarchy First-Boot Provisioning
-After=systemd-modules-load.service systemd-udevd.service local-fs.target home.mount
-Before=sddm.service display-manager.service
+Description=GoogleBook Moonstone Display & Keyboard Hardware Init
+After=systemd-modules-load.service systemd-udevd.service local-fs.target
+Before=display-manager.service gdm.service sddm.service lightdm.service
 
 [Service]
 Type=oneshot
@@ -506,46 +130,5 @@ SVCEOF
 mkdir -p /sysroot/etc/systemd/system/multi-user.target.wants /sysroot/etc/systemd/system/graphical.target.wants
 ln -sf ../googlebook-gpu-init.service /sysroot/etc/systemd/system/multi-user.target.wants/googlebook-gpu-init.service
 ln -sf ../googlebook-gpu-init.service /sysroot/etc/systemd/system/graphical.target.wants/googlebook-gpu-init.service
-ln -sf /usr/lib/systemd/system/sshd.service /sysroot/etc/systemd/system/multi-user.target.wants/sshd.service 2>/dev/null || true
 
-# 8. Ensure sshd is accessible for diagnostics and synchronize user/root password cleanly via chpasswd
-mkdir -p /sysroot/etc/ssh/sshd_config.d
-cat > /sysroot/etc/ssh/sshd_config.d/99-googlebook.conf << 'SSHEOF'
-PermitRootLogin yes
-PasswordAuthentication yes
-PubkeyAuthentication yes
-SSHEOF
-
-mkdir -p /sysroot/root/.ssh
-chmod 700 /sysroot/root/.ssh
-if [ -f /root/.ssh/authorized_keys ]; then
-  cat /root/.ssh/authorized_keys >> /sysroot/root/.ssh/authorized_keys
-  sort -u /sysroot/root/.ssh/authorized_keys -o /sysroot/root/.ssh/authorized_keys
-  chmod 600 /sysroot/root/.ssh/authorized_keys
-fi
-
-if [ -d "/sysroot/home/$PRIMARY_USER" ] && [ -f /root/.ssh/authorized_keys ]; then
-  uid_gid=$(get_uid_gid "$PRIMARY_USER" /sysroot/etc/passwd)
-  mkdir -p "/sysroot/home/$PRIMARY_USER/.ssh"
-  cat /root/.ssh/authorized_keys >> "/sysroot/home/$PRIMARY_USER/.ssh/authorized_keys"
-  sort -u "/sysroot/home/$PRIMARY_USER/.ssh/authorized_keys" -o "/sysroot/home/$PRIMARY_USER/.ssh/authorized_keys"
-  chmod 700 "/sysroot/home/$PRIMARY_USER/.ssh"
-  chmod 600 "/sysroot/home/$PRIMARY_USER/.ssh/authorized_keys"
-  chown -R "$uid_gid" "/sysroot/home/$PRIMARY_USER/.ssh" 2>/dev/null || true
-fi
-
-# Synchronize user & root passwords via chroot chpasswd (preserving SELinux context on /etc/shadow!)
-if [ -f /run/googleboot/luks.pass ]; then
-  LUKS_PASS=$(cat /run/googleboot/luks.pass)
-  rm -f /run/googleboot/luks.pass
-  if [ -n "$LUKS_PASS" ]; then
-    printf '%s:%s\nroot:%s\n' "$PRIMARY_USER" "$LUKS_PASS" "$LUKS_PASS" | chroot /sysroot chpasswd 2>/dev/null || true
-  fi
-fi
-chroot /sysroot restorecon -F /etc/shadow /etc/passwd /etc/group 2>/dev/null || true
-
-if [ "$HOME_MOUNTED_BY_SYNC" = 1 ]; then
-  sync
-  umount /sysroot/home 2>/dev/null || true
-fi
 exit 0

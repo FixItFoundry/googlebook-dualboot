@@ -1,6 +1,11 @@
-# Googlebook 14 (`Moonstone`) Dual-Boot: Android 17 + Fedomakase Linux
+# Googlebook 14 (`Moonstone`) Universal Dual-Boot Toolkit
 
-Complete dual-boot toolkit, kernel modules, installer patches, and step-by-step guide for running **Android 17 / Aluminum OS (Slot A)** alongside **Fedomakase Linux (Fedora 44 + Omarchy Quattro Hyprland, Slot B)** on the **Acer Googlebook 14 (`GP714-91N`, `Moonstone` / `Google_Fatcat`, Intel Panther Lake `x86_64`)**.
+Universal dual-boot toolkit, graphical `kexec` bootloader (`googleboot-menu`), Coreboot framebuffer kernel modules, and Depthcharge Slot B scripts for running **Googlebook OS / Android 17 (Slot A)** alongside **any Linux distribution (Fedora, Arch, Ubuntu, Debian, NixOS, CachyOS) or Windows 11 (Slot B)** on the **Acer Googlebook 14 (`GP714-91N`, `Moonstone` / `Google_Fatcat`, Intel Panther Lake `x86_64`)**.
+
+> [!IMPORTANT]
+> **Hardware Validation Notice:** This repository and its partition layout, Depthcharge A/B slot tooling, and Coreboot/Panther Lake kernel modules have **only been validated on the Acer Googlebook 14 (`GP714-91N`, board `Moonstone` / `Google_Fatcat`)**. Other Googlebook / Aluminum OS boards may use different partition numbering, display panels, or EC/audio topologies and are not yet validated.
+>
+> **Fedomakase / Omarchy Branch:** For Fedomakase / Omarchy Quattro-specific Anaconda Kickstart patches and provisioning helpers, see the [`googlebook-db-Fedomakase`](https://github.com/FixItFoundry/googlebook-dualboot/tree/googlebook-db-Fedomakase) branch.
 
 ---
 
@@ -15,8 +20,8 @@ The Acer Googlebook 14 (`Moonstone`, board family `Google_Fatcat`) uses:
 ### How A/B Dual-Boot Works
 | Slot | OS | Boot Partitions | Root Filesystem |
 | :--- | :--- | :--- | :--- |
-| **Slot A** | Android 17 (Factory OS) | `boot_a` (`p13`), `init_boot_a` (`p18`), `vendor_boot_a` (`p20`), `vbmeta_a` (`p15`) | `super` (`p25`) + `userdata` (`p31`) |
-| **Slot B** | Fedomakase (Fedora 44 + Omarchy) | `boot_b` (`p14`, 64 MiB), `init_boot_b` (`p19`, 8 MiB), `vendor_boot_b` (`p21`, 32 MiB), `vbmeta_b` (`p16`) | `p11` (`ext4` `/boot`, 2 GiB) + `p32` (`LUKS2` $\rightarrow$ `Btrfs` `root` & `home` subvolumes) |
+| **Slot A** | Googlebook OS / Android 17 (Factory OS) | `boot_a` (`p13`), `init_boot_a` (`p18`), `vendor_boot_a` (`p20`), `vbmeta_a` (`p15`) | `super` (`p25`) + `userdata` (`p31`) |
+| **Slot B** | Linux (`googleboot-menu` + Target Distro) | `boot_b` (`p14`, 64 MiB), `init_boot_b` (`p19`, 8 MiB), `vendor_boot_b` (`p21`, 32 MiB), `vbmeta_b` (`p16`) | `p11` (`ext4` `/boot`, 2 GiB) + `p32` (`LUKS2` or plain `Btrfs`/`ext4` root) |
 
 Depthcharge selects the active boot slot by reading the ChromeOS/Depthcharge GPT attribute flags on `vbmeta_a` (`p15`) and `vbmeta_b` (`p16`). All 31 factory Android partitions remain 100% untouched.
 
@@ -28,18 +33,18 @@ When upgrading from the factory 512 GB NVMe to a 1 TB / 2 TB NVMe, there are two
 
 ### Option A (Recommended): Clone & Install While the New NVMe is in a USB-C Enclosure, Then Swap Internally
 1. Keep the factory 512 GB NVMe inside the Googlebook (`nvme0n1`) and connect the new 1 TB / 2 TB NVMe via a USB-C NVMe enclosure (`/dev/sda`).
-2. Boot the Fedomakase Netinst environment in Slot B (in RAM), clone `/dev/nvme0n1` $\rightarrow$ `/dev/sda`, relocate the backup GPT header (`sgdisk -e /dev/sda`), and run the Fedomakase installer targeting `/dev/sda`.
+2. Boot the Linux installer environment in Slot B (in RAM), clone `/dev/nvme0n1` $\rightarrow$ `/dev/sda`, relocate the backup GPT header (`sgdisk -e /dev/sda`), and run your Linux installer targeting `/dev/sda`.
 3. Once installation completes, power off, swap the 1 TB / 2 TB NVMe into the internal M.2 slot, and boot.
 
 **Why Option A is cleaner and safer:**
 - The original 512 GB NVMe is never modified and serves as an untouched hardware backup.
 - No third computer or external Linux host is needed to clone the drives.
-- Because `fedomakase-googlebook-slotb` and `crypttab`/`fstab` reference partitions strictly by **filesystem/LUKS UUID** (`UUID=...`), moving the drive from `/dev/sda` (USB-C) to `/dev/nvme0n1` (internal M.2) requires zero `fstab` or `crypttab` changes.
+- Because [`googlebook-pack-slotb`](bin/googlebook-pack-slotb) and `crypttab`/`fstab` reference partitions strictly by **filesystem/LUKS UUID** (`UUID=...`), moving the drive from `/dev/sda` (USB-C) to `/dev/nvme0n1` (internal M.2) requires zero `fstab` or `crypttab` changes.
 
 ### Option B: Clone Externally, Swap Drive First, Then Install Internally
 1. Clone the 512 GB NVMe to the 1 TB / 2 TB NVMe using an external dual-bay cloner or another Linux machine, and run `sgdisk -e` on the new drive.
 2. Install the 1 TB / 2 TB NVMe into the Googlebook's internal M.2 slot (`nvme0n1`).
-3. Flash the Slot B installer via Fastboot and install Fedomakase directly onto the unallocated space of `nvme0n1`.
+3. Flash the Slot B installer via Fastboot and install Linux directly onto the unallocated space of `nvme0n1`.
 
 ---
 
@@ -50,12 +55,12 @@ When upgrading from the factory 512 GB NVMe to a 1 TB / 2 TB NVMe, there are two
 - USB-C Ethernet adapter (recommended for Fastboot over TCP and fast package downloads) and a USB-C NVMe enclosure (if upgrading the SSD via Option A).
 - `android-platform-tools` (`fastboot`, `mkbootimg`) installed on your host computer.
 
-### Step 1: Boot the Slot B Netinst Installer
-1. Build or use the pre-packed Slot B installer images (`boot_b.img`, `init_boot_b.img`, `vendor_boot_b.img`):
+### Step 1: Boot the Slot B Installer
+1. Build the Slot B installer images (`boot_b.img`, `init_boot_b.img`, `vendor_boot_b.img`):
    ```bash
-   ./scripts/build-slotb-installer.sh ./iso-extracted ./slotb-installer http://<YOUR_HOST_IP>:8080 ./coreboot-mods/6.19.10-300.fc44.x86_64
+   ./scripts/build-slotb-installer.sh ./iso-extracted ./slotb-installer http://<YOUR_HOST_IP>:8080 ./coreboot-mods/prebuilt/6.19.10-300.fc44.x86_64
    ```
-2. Start an HTTP server hosting the extracted ISO directory (which serves `images/install.img` and `omarchy-ks.cfg`):
+2. Start an HTTP server hosting the extracted ISO directory:
    ```bash
    python3 -m http.server 8080 --bind 0.0.0.0 --directory ./iso-extracted
    ```
@@ -65,47 +70,48 @@ When upgrading from the factory 512 GB NVMe to a 1 TB / 2 TB NVMe, there are two
    ```
 
 ### Step 2: Clone Factory 512 GB NVMe to 1 TB / 2 TB NVMe & Expand GPT
-Once the installer boots (accessible on screen or via `ssh root@<GOOGLEBOOK_IP>`), clone the internal 512 GB NVMe (`/dev/nvme0n1`) to the USB-C 1 TB / 2 TB NVMe (`/dev/sda`) and move the backup GPT header to the end of the 1 TB disk:
+Once the installer boots, clone the internal 512 GB NVMe (`/dev/nvme0n1`) to the USB-C 1 TB / 2 TB NVMe (`/dev/sda`) and move the backup GPT header to the end of the 1 TB disk:
 ```bash
 ./scripts/clone-and-expand-nvme.sh /dev/nvme0n1 /dev/sda
 ```
 > [!IMPORTANT]
-> Running `sgdisk -e /dev/sda` is mandatory after block-cloning a 512 GB drive to a 1 TB+ drive. Without `sgdisk -e`, the GPT usable sector boundary (`LastUsableLBA`) remains capped at the 512 GB mark, hiding the upper 476+ GiB of unallocated space from `parted` and Anaconda.
+> Running `sgdisk -e /dev/sda` is mandatory after block-cloning a 512 GB drive to a 1 TB+ drive. Without `sgdisk -e`, the GPT usable sector boundary (`LastUsableLBA`) remains capped at the 512 GB mark, hiding the upper 476+ GiB of unallocated space from `parted` and OS installers.
 
-### Step 3: Run the Interactive Fedomakase Installer
-On the Googlebook display (`tty3`), complete the Gum TUI wizard:
-1. Select target drive (`sda` when installing to USB-C enclosure, or `nvme0n1` when installing internally).
-2. Enter your username, password, hostname, timezone, and LUKS2 encryption preference.
-3. The patched [`omarchy-installer.sh`](patches/omarchy-installer.sh) automatically detects the 31-partition Googlebook layout and creates:
-   - Partition `11` (`2 GiB`, `ext4`, mounted at `/boot`, reusing the empty 1 MiB `efi` slot number in the free space after `userdata` `p31`).
-   - Partition `32` (remaining ~475 GiB, `LUKS2` $\rightarrow$ `Btrfs` with `root` and `home` subvolumes).
-4. At the end of installation (`%post`), [`fedomakase-googlebook-slotb`](bin/fedomakase-googlebook-slotb) packs the installed Fedora kernel and split initramfs (`rd_vendor` + `rd_init`) into `boot_b` (`p14`), `init_boot_b` (`p19`), and `vendor_boot_b` (`p21`).
+### Step 3: Partition & Pack Slot B
+1. Create partition `11` (`2 GiB`, `ext4`, mounted at `/boot`, reusing the empty 1 MiB `efi` slot number in the free space after `userdata` `p31`) and partition `32` (remaining ~475 GiB for your Linux rootfs, plain or `LUKS2`).
+2. After installing your Linux distribution into `/mnt` or `/mnt/sysroot`, pack the installed kernel, Coreboot framebuffer modules, and [`googleboot-menu`](googleboot-menu/README.md) into `boot_b` (`p14`), `init_boot_b` (`p19`), and `vendor_boot_b` (`p21`):
+   ```bash
+   sudo ./bin/googlebook-pack-slotb
+   ```
 
 ---
 
-## 4. Switching Between Android 17 (Slot A) and Fedomakase Linux (Slot B)
+## 4. Switching Between Googlebook OS / Android 17 (Slot A) and Linux (Slot B)
 
-### From Fedomakase Linux (No External Computer Required)
+### From the Graphical `googleboot-menu` Bootloader
+At every boot on Slot B, **`googleboot-menu`** renders a native `2880x1800` graphical boot selector where you can choose **Fedora / Linux** (with integrated LUKS2 passphrase unlock) or **Googlebook OS** (one-shot reboot into Slot A while keeping Slot B as the default next boot).
+
+### From the Linux CLI (No External Computer Required)
 Use [`googlebook-switch-slot`](bin/googlebook-switch-slot) (or its alias `boot-android`):
 ```bash
 # Check current active boot slot:
 sudo googlebook-switch-slot status
 
-# Reboot into Android 17 (Slot A):
+# Reboot into Googlebook OS / Android 17 (Slot A):
 sudo boot-android a --reboot
 
-# Keep Slot B (Fedomakase Linux) active:
+# Keep Slot B (Linux) active:
 sudo googlebook-switch-slot b
 ```
 
-### From Android 17 or Fastboot Bootloader Menu
+### From Fastboot Bootloader Menu
 1. Reboot and hold Volume Down / select **Bootloader (Fastboot)** on screen.
 2. From any computer on USB or LAN:
    ```bash
-   # Boot Fedomakase Linux (Slot B):
+   # Boot Linux (Slot B):
    fastboot --set-active=b && fastboot reboot
 
-   # Boot Android 17 (Slot A):
+   # Boot Googlebook OS / Android 17 (Slot A):
    fastboot --set-active=a && fastboot reboot
    ```
 
@@ -114,21 +120,19 @@ sudo googlebook-switch-slot b
 ## 5. Technical Reference: Key Fixes & Engineering Notes
 
 1. **Coreboot Framebuffer (`coreboot_table.ko` + `framebuffer-coreboot.ko`)**:
-   - Upstream Fedora x86_64 kernels disable `CONFIG_GOOGLE_COREBOOT_TABLE` and `CONFIG_GOOGLE_FRAMEBUFFER_COREBOOT`. Without them, `simpledrm` has no framebuffer device when booted from Depthcharge, resulting in a black screen during initramfs/LUKS unlock.
-   - Sources in [`coreboot-mods/`](coreboot-mods/) build out-of-tree against `kernel-devel` and are automatically rebuilt across kernel upgrades by [`fedomakase-googlebook-slotb`](bin/fedomakase-googlebook-slotb).
+   - Upstream distro x86_64 kernels often disable `CONFIG_GOOGLE_COREBOOT_TABLE` and `CONFIG_GOOGLE_FRAMEBUFFER_COREBOOT`. Without them, `simpledrm` has no framebuffer device when booted from Depthcharge, resulting in a black screen during initramfs/LUKS unlock.
+   - Sources in [`coreboot-mods/`](coreboot-mods/) build out-of-tree against `kernel-devel` / `linux-headers` and are automatically rebuilt across kernel upgrades by [`googlebook-pack-slotb`](bin/googlebook-pack-slotb).
 2. **Two-Archive Initramfs Split (`rd_vendor.img` + `rd_init.img`)**:
    - Depthcharge concatenates the `vendor_boot` ramdisk (`32 MiB` partition) and `init_boot` ramdisk (`8 MiB` partition) in memory, but aligns each fragment to a `2048`-byte page boundary with zero bytes (`0x00`).
    - Byte-slicing a single `.cpio.zst` archive across `vendor_boot_b` and `init_boot_b` corrupts the `zstd` stream at the 32 MiB boundary (`ZSTD_compressedBlock: Corrupted block detected`).
-   - Instead, [`fedomakase-googlebook-slotb`](bin/fedomakase-googlebook-slotb) packs two **independent** `.cpio.zst` archives (`rd_vendor.img` containing userspace and `rd_init.img` containing `/usr/lib/modules/<kver>`), which the Linux kernel's `initramfs.c` unpacks sequentially while skipping the zero-padding between them.
-3. **Controlling Terminal (`TIOCSCTTY`) Fix in `omarchy-installer.sh`**:
-   - Anaconda's `%pre` runs without a controlling terminal on `/dev/tty3`, causing `gum`'s `/dev/tty` open to fail with `ENXIO`. [`patches/omarchy-installer.sh`](patches/omarchy-installer.sh) acquires `/dev/tty3` via `ioctl(0, TIOCSCTTY, 1)` before launching the TUI.
-4. **SDDM Wayland Greeter & Staged Intel Xe2 (`xe.ko`) Initialization**:
-   - Fixes SDDM's `[Wayland] CompositorCommand` (`Hyprland --config /usr/share/sddm/hyprland.lua`), configures LUKS post-unlock `[Autologin]` for `omarchy.desktop`, symlinks `/usr/share/omarchy/bin/*` into `/usr/bin/`, and loads `xe.ko` right before `sddm.service` once `/usr/lib/firmware/xe/*` is mounted on the Btrfs root filesystem.
+   - Instead, [`googlebook-pack-slotb`](bin/googlebook-pack-slotb) packs two **independent** `.cpio.zst` archives (`rd_vendor.img` containing userspace + `googleboot-menu`, and `rd_init.img` containing `/usr/lib/modules/<kver>`), which the Linux kernel's `initramfs.c` unpacks sequentially while skipping the zero-padding between them.
+3. **Staged Intel Panther Lake Xe2 (`xe.ko`) Initialization & Vivaldi Keymap**:
+   - [`googlebook-sysroot-sync`](bin/googlebook-sysroot-sync) installs `/etc/modprobe.d/googlebook-xe-staged.conf` (`enable_psr=0`), `googlebook-gpu-init.service` (loading `xe.ko` once `/usr/lib/firmware/xe/*` is mounted on the root filesystem), and `/etc/udev/hwdb.d/61-googlebook-moonstone.hwdb` + `/etc/keyd/cros.conf` for the top-row ChromeEC action keys.
 
 ---
 
 ## 6. Installing Other Linux Distros, Graphical `kexec` Menu & Bare-Metal Windows 11
 
-- **[`googleboot-menu/`](googleboot-menu/README.md)**: Graphical DRM/KMS + `kexec` universal bootloader (`2880x1800` OLED) with live-editable themes (`theme.conf`), built-in LUKS2 passphrase modal, hotplug USB ISO scanner, and One-Shot Android 17 slot switching.
-- **[`docs/ANY_DISTRO_AND_OS_SWITCHING.md`](docs/ANY_DISTRO_AND_OS_SWITCHING.md)**: Booting **any Linux distribution** (Arch, Vanilla Omarchy, Ubuntu, Debian, NixOS, CachyOS) and switching between Android 17 (Slot A) and Linux (Slot B).
+- **[`googleboot-menu/`](googleboot-menu/README.md)**: Graphical DRM/KMS + `kexec` universal bootloader (`2880x1800` OLED) with live-editable themes (`theme.conf`), built-in LUKS2 passphrase modal, hotplug USB ISO scanner, and One-Shot Googlebook OS slot switching.
+- **[`docs/ANY_DISTRO_AND_OS_SWITCHING.md`](docs/ANY_DISTRO_AND_OS_SWITCHING.md)**: Booting **any Linux distribution** (Fedora, Arch, Omarchy, Ubuntu, Debian, NixOS, CachyOS) and switching between Googlebook OS / Android 17 (Slot A) and Linux (Slot B).
 - **[`docs/WINDOWS_11_BARE_METAL_AND_CROSECBUS.md`](docs/WINDOWS_11_BARE_METAL_AND_CROSECBUS.md)**: Bare-metal Windows 11 chainloading via the RAM-resident **Das U-Boot `x86_64` UEFI Bridge** (`uefi-bridge.bzImage` -> `bootmgfw.efi`) and source-level analysis of **[`coolstar/crosecbus`](https://github.com/coolstar/crosecbus)** on Intel Panther Lake (`ACPI\GOOG0004`).

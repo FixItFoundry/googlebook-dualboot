@@ -457,7 +457,7 @@ GECOS_NAME="${REAL_NAME:-$USERNAME}"
   else
     echo "bootloader --timeout=1 --append=\"quiet rhgb systemd.tty.term.console=dumb plymouth.enable=1\""
   fi
-  echo "user --name=${USERNAME} --gecos=\"${GECOS_NAME}\" --groups=wheel --password=${USER_HASH}"
+  echo "user --name=${USERNAME} --gecos=\"${GECOS_NAME}\" --groups=wheel --password=${USER_HASH} --iscrypted"
 } > "$PART_CFG"
 chmod 600 "$PART_CFG"
 

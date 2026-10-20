@@ -23,9 +23,12 @@ if [[ -z "$DISK" ]]; then
   # Locate the disk that holds /boot or / (never by global partlabel alone,
   # since during USB-C cloning the source drive may also be attached)
   BOOT_SRC=$(findmnt -no SOURCE /boot 2>/dev/null || findmnt -no SOURCE / | sed 's/\[.*\]//')
-  DEV="$BOOT_SRC"
+  DEV=$(readlink -f "$BOOT_SRC" 2>/dev/null || echo "$BOOT_SRC")
   while [[ "$(lsblk -ndo TYPE "$DEV" 2>/dev/null | head -1)" != "disk" ]]; do
     parent=$(lsblk -ndo PKNAME "$DEV" 2>/dev/null | head -1)
+    if [[ -z "$parent" && -d "/sys/class/block/$(basename "$DEV")/slaves" ]]; then
+      parent=$(ls -1 "/sys/class/block/$(basename "$DEV")/slaves" 2>/dev/null | head -1)
+    fi
     [[ -n "$parent" ]] || break
     DEV="/dev/$parent"
   done

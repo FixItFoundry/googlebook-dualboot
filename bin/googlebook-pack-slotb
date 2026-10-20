@@ -237,6 +237,22 @@ for pair in "boot_b.img:$BOOT_B" "init_boot_b.img:$INIT_B" "vendor_boot_b.img:$V
   log "wrote $(basename "$img") -> $dev"
 done
 
+# Save backup copy of Slot B images & restore wrapper onto /boot (p11, unencrypted ext4)
+# so Googlebook OS (Android 17) OTAs can be promoted to Slot A and Linux Slot B restored in 1s.
+if [[ -d /boot ]]; then
+  mkdir -p /boot/slotb-backup
+  cp -f "$W/boot_b.img" "$W/init_boot_b.img" "$W/vendor_boot_b.img" /boot/slotb-backup/ 2>/dev/null || true
+  for rscript in "$SELF_DIR/bin/googlebook-restore-slotb" "/usr/local/bin/googlebook-restore-slotb" "/usr/share/omarchy/bin/googlebook-restore-slotb"; do
+    if [[ -f "$rscript" ]]; then
+      cp -f "$rscript" /boot/slotb-backup/googlebook-restore-slotb
+      chmod 755 /boot/slotb-backup/googlebook-restore-slotb
+      break
+    fi
+  done
+  [[ -x /usr/local/bin/googleboot-menu ]] && cp -f /usr/local/bin/googleboot-menu /boot/slotb-backup/googleboot-menu || true
+  log "saved Slot B backup to /boot/slotb-backup"
+fi
+
 # kernel-install hook so every kernel update refreshes Slot B
 HOOK=/etc/kernel/install.d/95-googlebook-slotb.install
 if [[ ! -f "$HOOK" ]]; then

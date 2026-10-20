@@ -63,6 +63,20 @@ Comparing the `iso-extracted/omarchy-ks.cfg` used during installation against th
 - On Fedora Btrfs (`autopart --type=btrfs`), `/` is `subvol=root` and `/home` is `subvol=home`.
 - During `googlebook-sysroot-sync.service` (`Before=initrd-switch-root.target`), only `/sysroot` (`subvol=root`) is mounted by `sysroot.mount`; `/sysroot/home` is an empty directory unless `subvol=home` is explicitly mounted at `/sysroot/home` during the sync step.
 
+### Root Cause 6: Missing `python3-pyxdg` (`xdg` module) in `uwsm-0.27.1-1.fc44`
+- `/usr/bin/uwsm` (`uwsm-0.27.1-1.fc44.x86_64`) imports `from xdg import BaseDirectory`, `from xdg.util import which`, `from xdg.DesktopEntry import DesktopEntry`, and `from xdg.Exceptions import ValidationError`, but the COPR RPM omitted `Requires: python3-pyxdg`.
+- As a result, launching `omarchy.desktop` (`uwsm start -g -1 -e -D Hyprland hyprland.desktop`) immediately exited with `ModuleNotFoundError: No module named 'xdg'` (`exit code 1`), returning to the SDDM greeter.
+- Additionally, launching the SDDM greeter via `CompositorCommand=Hyprland --config /usr/share/sddm/hyprland.lua` instead of `CompositorCommand=start-hyprland -- --config /usr/share/sddm/hyprland.lua` caused Hyprland `0.56.2` to display `"Hyprland was started without start-hyprland"`.
+
+### Root Cause 7: Intel Panther Lake `xe.ko` Media GT (`GT1`) GSC Firmware Upload Timeout Wedging the GPU
+- Under Coreboot/Depthcharge on Moonstone (`0000:00:02.0`, PCI ID `8086:b090`), `xe.ko` attempts to upload GSC firmware (`xe/ptl_gsc_1.bin`) on `Tile0: GT1` via `mei_gsc_proxy`, which times out (`-ETIME`) and causes `wedged_mode=1` to declare the entire GPU (`0000:00:02.0`) wedged (`IOCTLs and executions are blocked`), aborting Hyprland (`SIGABRT`).
+- Passing `options xe gsc_firmware_path="" huc_firmware_path="" wedged_mode=0 enable_psr=0` (and checking `[ ! -e /dev/dri/renderD128 ]` instead of `[ ! -e /dev/dri/card0 ]` which is occupied by `simpledrm`) allows `xe.ko` to initialize cleanly at `2880x1800@120Hz` with full hardware acceleration (`/dev/dri/renderD128`) and OLED backlight control (`/sys/class/backlight/intel_backlight`).
+
+### Root Cause 8: Moonstone Vivaldi Top-Row Keyboard `keyd` Remap & Scancodes `> 247`
+- Moonstone's ChromeEC (`i8042` `function_row_physmap = EA AA 92 91 93 94 95 9E A9 9B A7 A0 AE B0`) natively emits media/action keycodes when pressed without `Fn` and emits `F1..F12` when pressed with `Fn`.
+- Having `f1 = back ... f10 = volumeup` in `[main]` of `/etc/keyd/cros.conf` intercepted `Fn + top-row` (`F1..F10`) and turned them back into media keys.
+- Furthermore, scancodes `0x91` (`KEY_FULL_SCREEN = 372`), `0x9B` (`KEY_MICMUTE = 248`), and `0xA7` (`KEY_ACCESSIBILITY = 586`) exceed XKB's single-byte evdev keycode ceiling (`247`), requiring `EVIOCSKEYCODE` mapping to `87` (`F11`), `190` (`F20` / `XF86AudioMicMute`), and `164` (`KEY_PLAYPAUSE`).
+
 ---
 
 ## 3. Two-Tier Fix Implemented

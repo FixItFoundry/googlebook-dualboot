@@ -61,7 +61,12 @@ depmod -a "$KVER" 2>/dev/null || true
 mkdir -p /etc/modules-load.d /etc/modprobe.d /etc/dracut.conf.d
 printf "coreboot_table\nframebuffer-coreboot\n" > /etc/modules-load.d/coreboot-fb.conf
 rm -f /etc/modprobe.d/googlebook-no-xe.conf
-printf "blacklist i915\nblacklist xe\n" > /etc/modprobe.d/googlebook-xe-staged.conf
+cat > /etc/modprobe.d/googlebook-xe-staged.conf <<'EOF'
+blacklist i915
+blacklist xe
+options xe gsc_firmware_path="" huc_firmware_path="" wedged_mode=0 enable_psr=0
+options spi_intel_pci writeable=1
+EOF
 cat > /etc/dracut.conf.d/90-googlebook-slotb.conf <<'EOF'
 omit_drivers+=" i915 xe amdgpu radeon nouveau cxgb4 "
 add_drivers+=" nvme nvme_core btrfs uas usb_storage coreboot_table framebuffer-coreboot cros_ec cros_ec_lpcs cros_ec_keyb "

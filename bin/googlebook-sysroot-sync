@@ -99,7 +99,12 @@ fi
 mkdir -p /sysroot/etc/modules-load.d /sysroot/etc/modprobe.d
 printf "coreboot_table\nframebuffer-coreboot\n" > /sysroot/etc/modules-load.d/coreboot-fb.conf
 rm -f /sysroot/etc/modprobe.d/googlebook-no-xe.conf
-printf "blacklist i915\nblacklist xe\n" > /sysroot/etc/modprobe.d/googlebook-xe-staged.conf
+cat > /sysroot/etc/modprobe.d/googlebook-xe-staged.conf << 'XEEOF'
+blacklist i915
+blacklist xe
+options xe gsc_firmware_path="" huc_firmware_path="" wedged_mode=0 enable_psr=0
+options spi_intel_pci writeable=1
+XEEOF
 
 # 5. Install Googlebook Slot A/B switch utility, googleboot-menu binary, udev rules, and sudoers
 mkdir -p /sysroot/usr/local/bin /sysroot/usr/local/sbin /sysroot/etc/udev/rules.d /sysroot/etc/sudoers.d
@@ -160,7 +165,39 @@ ENVBOOTEOF
     ln -sf /usr/share/omarchy/default/bash/env-bootstrap "$R/etc/profile.d/omarchy.sh"
   fi
 
-  mkdir -p "$R/usr/share/uwsm/env.d"
+  mkdir -p "$R/usr/share/uwsm/env.d" "$R/usr/share/uwsm/modules"
+  if [ -d /usr/share/omarchy-seed/uwsm-xdg ] && [ ! -d "$R/usr/lib/python3.14/site-packages/xdg" ]; then
+    cp -rf /usr/share/omarchy-seed/uwsm-xdg "$R/usr/share/uwsm/modules/xdg" 2>/dev/null || true
+  fi
+  if [ -d "$R/etc/systemd/user" ] && [ -d /usr/share/omarchy-seed/etc/systemd/user ]; then
+    cp -rf /usr/share/omarchy-seed/etc/systemd/user/. "$R/etc/systemd/user/" 2>/dev/null || true
+  fi
+  mkdir -p "$R/etc/keyd"
+  cat > "$R/etc/keyd/cros.conf" << 'KEYDEOF'
+[ids]
+0001:0001
+18d1:*
+
+[main]
+zoom = f11
+micmute = f20
+
+[meta]
+back = f1
+homepage = f2
+refresh = f2
+scale = f3
+zoom = f4
+sysrq = f5
+brightnessdown = f6
+brightnessup = f7
+kbdillumtoggle = f8
+micmute = f9
+playpause = f10
+mute = f10
+volumedown = f11
+volumeup = f12
+KEYDEOF
   if [ -f "$R/usr/share/omarchy/default/uwsm/default" ]; then
     cp -f "$R/usr/share/omarchy/default/uwsm/default" "$R/usr/share/uwsm/default"
   else
@@ -208,7 +245,8 @@ UWSMENVEOF
   fi
 
   if [ -f "$R/usr/share/omarchy/bin/omarchy-apply-fedora-patches" ]; then
-    sed -i 's|CompositorCommand=uwsm start -e -D Hyprland hyprland.desktop|CompositorCommand=Hyprland --config /usr/share/sddm/hyprland.lua|g' "$R/usr/share/omarchy/bin/omarchy-apply-fedora-patches" 2>/dev/null || true
+    sed -i 's|CompositorCommand=uwsm start -e -D Hyprland hyprland.desktop|CompositorCommand=start-hyprland -- --config /usr/share/sddm/hyprland.lua|g' "$R/usr/share/omarchy/bin/omarchy-apply-fedora-patches" 2>/dev/null || true
+    sed -i 's|CompositorCommand=Hyprland --config /usr/share/sddm/hyprland.lua|CompositorCommand=start-hyprland -- --config /usr/share/sddm/hyprland.lua|g' "$R/usr/share/omarchy/bin/omarchy-apply-fedora-patches" 2>/dev/null || true
     sed -i 's|grep -q "uwsm start" "\$sddm_wayland"|grep -q "/usr/share/sddm/hyprland.lua" "\$sddm_wayland"|g' "$R/usr/share/omarchy/bin/omarchy-apply-fedora-patches" 2>/dev/null || true
   fi
 
@@ -226,7 +264,7 @@ UWSMENVEOF
 DisplayServer=wayland
 
 [Wayland]
-CompositorCommand=Hyprland --config /usr/share/sddm/hyprland.lua
+CompositorCommand=start-hyprland -- --config /usr/share/sddm/hyprland.lua
 SessionDir=/usr/share/wayland-sessions
 
 [Theme]
@@ -364,20 +402,28 @@ setenforce 0 2>/dev/null || true
 restorecon -F /etc/shadow /etc/passwd /etc/group 2>/dev/null || true
 
 # Attempt to set ChromeOS GBB_FLAG_DEV_SCREEN_SHORT_DELAY (0x1 = 2 second bootloader screen delay)
+modprobe -r mtdblock spi_intel_pci 2>/dev/null || true
 modprobe spi_intel_pci writeable=1 2>/dev/null || modprobe spi_intel_pci 2>/dev/null || true
 modprobe mtdblock 2>/dev/null || true
 if [ -x /usr/local/bin/googleboot-menu ]; then
-  for mtd_dev in /dev/mtd0 /dev/mtdblock0; do
+  for mtd_dev in /dev/mtdblock0 /dev/mtd0; do
     [ -e "$mtd_dev" ] && /usr/local/bin/googleboot-menu --set-gbb-short-delay "$mtd_dev" 2>/dev/null && break
   done
-  if command -v flashrom >/dev/null 2>&1; then
-    if flashrom -p internal -r /tmp/gbb.bin -i GBB >/dev/null 2>&1; then
-      if /usr/local/bin/googleboot-menu --set-gbb-short-delay /tmp/gbb.bin >/dev/null 2>&1; then
-        flashrom -p internal -w /tmp/gbb.bin -i GBB --noverify-all >/dev/null 2>&1 || true
-      fi
-      rm -f /tmp/gbb.bin
-    fi
-  fi
+fi
+
+# Map Moonstone Vivaldi top-row scancodes >247 (0x91 Fullscreen -> 87 F11, 0x9B MicMute -> 190 F20/XF86AudioMicMute, 0xA7 Access -> 164 PlayPause)
+if command -v python3 >/dev/null 2>&1; then
+  python3 - << 'PY' 2>/dev/null || true
+import fcntl, glob, struct
+EVIOCSKEYCODE = 0x40084504
+for dev in glob.glob("/dev/input/by-path/*i8042-serio-0-event-kbd"):
+    with open(dev, "wb") as fd:
+        for sc, kc in [(0x91, 87), (0x9B, 190), (0xA7, 164)]:
+            try:
+                fcntl.ioctl(fd, EVIOCSKEYCODE, struct.pack("II", sc, kc))
+            except Exception:
+                pass
+PY
 fi
 
 for user_dir in /home/*; do
@@ -427,8 +473,8 @@ for user_dir in /home/*; do
   fi
 done
 
-if [ ! -e /dev/dri/card0 ]; then
-  modprobe xe 2>/dev/null || true
+if [ ! -e /dev/dri/renderD128 ]; then
+  modprobe xe gsc_firmware_path="" huc_firmware_path="" wedged_mode=0 enable_psr=0 2>/dev/null || true
 fi
 exit 0
 GPUEOF

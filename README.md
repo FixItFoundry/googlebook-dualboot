@@ -128,6 +128,10 @@ sudo googlebook-switch-slot b
    - Instead, [`googlebook-pack-slotb`](bin/googlebook-pack-slotb) packs two **independent** `.cpio.zst` archives (`rd_vendor.img` containing userspace + `googleboot-menu`, and `rd_init.img` containing `/usr/lib/modules/<kver>`), which the Linux kernel's `initramfs.c` unpacks sequentially while skipping the zero-padding between them.
 3. **Staged Intel Panther Lake Xe2 (`xe.ko`) Initialization & Vivaldi Keymap**:
    - [`googlebook-sysroot-sync`](bin/googlebook-sysroot-sync) installs `/etc/modprobe.d/googlebook-xe-staged.conf` (`enable_psr=0`), `googlebook-gpu-init.service` (loading `xe.ko` once `/usr/lib/firmware/xe/*` is mounted on the root filesystem), and `/etc/udev/hwdb.d/61-googlebook-moonstone.hwdb` + `/etc/keyd/cros.conf` for the top-row ChromeEC action keys.
+4. **SoundWire Audio Bringup (`snd-soc-sdw-utils.ko` + `snd-soc-sof-sdw.ko`, RT1320 Calibration & ALSA UCM)**:
+   - On `Moonstone` (`Google_Fatcat`), the Realtek `RT721` (jack) + `RT1320` (smart amp) combo shares SoundWire Link 3 (`sdw-master-0-3`), while the internal array microphone is a 2-channel PCH DMIC (`sof-ptl-dmic-2ch-id3.tplg`).
+   - Upstream `soc_sdw_utils.c` lacked `.quirk = SOC_SDW_CODEC_MIC, .quirk_exclude = true` on `rt1320-aif2` (causing an unrouted `SDW0-Capture-SimpleJack` BE link and a 128-byte `card->components` `-ENOSPC` overflow), had an early `break;` in `asoc_sdw_mc_dailink_exit_loop()` leaving `rtd_init_done` stale across reloads, and lacked a `Google_Fatcat` DMI quirk entry (`SOC_SDW_PCH_DMIC`) in `sof_sdw.c`.
+   - [`audio-mods/`](audio-mods/) builds patched `snd-soc-sdw-utils.ko` and `snd-soc-sof-sdw.ko` out-of-tree into `/lib/modules/<kver>/updates/`, installs the Android 17 `rt1320_*Google_Moonstone*.dat` calibration files to `/lib/firmware/realtek/rt1320/`, creates `/usr/share/alsa/ucm2/codecs/rt721+rt1320/init.conf`, and anchors the `SpeakerCodec1` regex in `/usr/share/alsa/ucm2/sof-soundwire/rt721.conf`. Both [`googlebook-pack-slotb`](bin/googlebook-pack-slotb) and [`googlebook-sysroot-sync`](bin/googlebook-sysroot-sync) keep these synced across kernel and `alsa-ucm` updates.
 
 ---
 

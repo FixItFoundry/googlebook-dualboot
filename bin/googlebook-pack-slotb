@@ -58,8 +58,48 @@ elif [[ -d "$SELF_DIR/coreboot-mods" && -d "/lib/modules/$KVER/build" ]]; then
   CB_BUILD=$(mktemp -d)
   cp -rf "$SELF_DIR/coreboot-mods"/* "$CB_BUILD/"
   make -C "/lib/modules/$KVER/build" M="$CB_BUILD" modules >/dev/null 2>&1 || true
+  strip --strip-debug "$CB_BUILD"/*.ko 2>/dev/null || true
   cp -f "$CB_BUILD"/*.ko "/lib/modules/$KVER/extra/" 2>/dev/null || true
   rm -rf "$CB_BUILD"
+fi
+
+# --- ensure Moonstone SoundWire audio modules (snd-soc-sdw-utils.ko & snd-soc-sof-sdw.ko), RT1320 firmware & UCM are installed ---
+mkdir -p "/lib/modules/$KVER/updates"
+if [[ -d "$SELF_DIR/audio-mods/prebuilt/$KVER" ]]; then
+  cp -f "$SELF_DIR/audio-mods/prebuilt/$KVER"/*.ko "/lib/modules/$KVER/updates/" 2>/dev/null || true
+elif [[ -d "$SELF_DIR/audio-mods" && -d "/lib/modules/$KVER/build" ]]; then
+  AUD_BUILD=$(mktemp -d)
+  cp -rf "$SELF_DIR/audio-mods"/{Makefile,sdw_utils,intel,codecs} "$AUD_BUILD/"
+  make -C "/lib/modules/$KVER/build" M="$AUD_BUILD" modules >/dev/null 2>&1 || true
+  strip --strip-debug "$AUD_BUILD/sdw_utils/snd-soc-sdw-utils.ko" "$AUD_BUILD/intel/boards/snd-soc-sof-sdw.ko" 2>/dev/null || true
+  cp -f "$AUD_BUILD/sdw_utils/snd-soc-sdw-utils.ko" "$AUD_BUILD/intel/boards/snd-soc-sof-sdw.ko" "/lib/modules/$KVER/updates/" 2>/dev/null || true
+  rm -rf "$AUD_BUILD"
+fi
+if [[ -d "$SELF_DIR/audio-mods/firmware/realtek/rt1320" ]]; then
+  mkdir -p /lib/firmware/realtek/rt1320
+  cp -f "$SELF_DIR/audio-mods/firmware/realtek/rt1320"/*.dat /lib/firmware/realtek/rt1320/ 2>/dev/null || true
+fi
+if [[ -d /usr/share/alsa/ucm2 ]]; then
+  mkdir -p /usr/share/alsa/ucm2/codecs/rt721+rt1320
+  cat > /usr/share/alsa/ucm2/codecs/rt721+rt1320/init.conf <<'UCMEOF'
+# RT721 + RT1320 combo speaker specific volume control settings
+
+FixedBootSequence [
+	msleep 200
+	cset "name='rt1320-1 Brown Out Switch' 0"
+	cset "name='rt1320-1 RAE Update' 1"
+	cset "name='rt1320-1 FU21 Playback Volume' 87"
+]
+
+BootSequence [
+	cset "name='rt1320-1 OT23 L Switch' 0"
+	cset "name='rt1320-1 OT23 R Switch' 0"
+	cset "name='Speaker Switch' 0,0"
+]
+UCMEOF
+  if [[ -f /usr/share/alsa/ucm2/sof-soundwire/rt721.conf ]]; then
+    sed -i 's/Regex "(rt721(-sdca)?)"/Regex "^(rt721(-sdca)?)$"/' /usr/share/alsa/ucm2/sof-soundwire/rt721.conf 2>/dev/null || true
+  fi
 fi
 depmod -a "$KVER" 2>/dev/null || true
 
@@ -128,8 +168,14 @@ for sync_script in \
   "/usr/bin/googlebook-sysroot-sync"; do
   if [[ -f "$sync_script" ]]; then
     mkdir -p "$W/unpacked/usr/bin" "$W/unpacked/usr/local/bin" \
+             "$W/unpacked/usr/local/lib/googlebook-mods" \
+             "$W/unpacked/usr/local/lib/googlebook-audio-mods" \
+             "$W/unpacked/usr/local/share/googlebook-audio/firmware" \
              "$W/unpacked/etc/systemd/system/initrd.target.wants" \
              "$W/unpacked/etc/systemd/system/initrd-switch-root.target.wants"
+    cp -f "/lib/modules/$KVER/extra"/*.ko "$W/unpacked/usr/local/lib/googlebook-mods/" 2>/dev/null || true
+    cp -f "/lib/modules/$KVER/updates"/snd-soc-*.ko "$W/unpacked/usr/local/lib/googlebook-audio-mods/" 2>/dev/null || true
+    cp -f /lib/firmware/realtek/rt1320/rt1320_*Google_Moonstone*.dat "$W/unpacked/usr/local/share/googlebook-audio/firmware/" 2>/dev/null || true
     cp -f "$sync_script" "$W/unpacked/usr/bin/googlebook-sysroot-sync"
     cp -f "$sync_script" "$W/unpacked/usr/local/bin/googlebook-sysroot-sync"
     chmod 755 "$W/unpacked/usr/bin/googlebook-sysroot-sync" "$W/unpacked/usr/local/bin/googlebook-sysroot-sync"

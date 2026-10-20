@@ -2,6 +2,9 @@
 
 Complete dual-boot toolkit, kernel modules, installer patches, and step-by-step guide for running **Android 17 / Aluminum OS (Slot A)** alongside **Fedomakase Linux (Fedora 44 + Omarchy Quattro Hyprland, Slot B)** on the **Acer Googlebook 14 (`GP714-91N`, `Moonstone` / `Google_Fatcat`, Intel Panther Lake `x86_64`)**.
 
+> [!IMPORTANT]
+> **Hardware Validation Notice:** This repository and its partition layout, Depthcharge A/B slot tooling, and Coreboot/Panther Lake kernel patches have **only been validated on the Acer Googlebook 14 (`GP714-91N`, board `Moonstone` / `Google_Fatcat`)**. Other Googlebook / Aluminum OS boards may use different partition numbering, display panels, or EC/audio topologies and are not yet validated.
+
 ---
 
 ## 1. Hardware & Boot Architecture Overview

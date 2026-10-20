@@ -37,6 +37,9 @@ FixedBootSequence [
 ]
 
 BootSequence [
+	cset "name='rt1320-1 Brown Out Switch' 0"
+	cset "name='rt1320-1 RAE Update' 1"
+	cset "name='rt1320-1 FU21 Playback Volume' 87"
 	cset "name='rt1320-1 OT23 L Switch' 0"
 	cset "name='rt1320-1 OT23 R Switch' 0"
 	cset "name='Speaker Switch' 0,0"

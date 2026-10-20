@@ -64,20 +64,23 @@ elif [[ -d "$SELF_DIR/coreboot-mods" && -d "/lib/modules/$KVER/build" ]]; then
 fi
 
 # --- ensure Moonstone SoundWire audio modules (snd-soc-sdw-utils.ko & snd-soc-sof-sdw.ko), RT1320 firmware & UCM are installed ---
+AUDIO_MODS_DIR="$SELF_DIR/audio-mods"
+[[ -d "$AUDIO_MODS_DIR/sdw_utils" ]] || AUDIO_MODS_DIR="/usr/local/src/moonstone-audio-fix"
+[[ -d "$AUDIO_MODS_DIR/sdw_utils" ]] || AUDIO_MODS_DIR="/usr/share/omarchy/install/hardware/audio-mods"
 mkdir -p "/lib/modules/$KVER/updates"
-if [[ -d "$SELF_DIR/audio-mods/prebuilt/$KVER" ]]; then
-  cp -f "$SELF_DIR/audio-mods/prebuilt/$KVER"/*.ko "/lib/modules/$KVER/updates/" 2>/dev/null || true
-elif [[ -d "$SELF_DIR/audio-mods" && -d "/lib/modules/$KVER/build" ]]; then
+if [[ -d "$AUDIO_MODS_DIR/prebuilt/$KVER" ]]; then
+  cp -f "$AUDIO_MODS_DIR/prebuilt/$KVER"/*.ko "/lib/modules/$KVER/updates/" 2>/dev/null || true
+elif [[ -d "$AUDIO_MODS_DIR/sdw_utils" && -d "/lib/modules/$KVER/build" ]]; then
   AUD_BUILD=$(mktemp -d)
-  cp -rf "$SELF_DIR/audio-mods"/{Makefile,sdw_utils,intel,codecs} "$AUD_BUILD/"
+  cp -rf "$AUDIO_MODS_DIR"/{Makefile,sdw_utils,intel,codecs} "$AUD_BUILD/"
   make -C "/lib/modules/$KVER/build" M="$AUD_BUILD" modules >/dev/null 2>&1 || true
   strip --strip-debug "$AUD_BUILD/sdw_utils/snd-soc-sdw-utils.ko" "$AUD_BUILD/intel/boards/snd-soc-sof-sdw.ko" 2>/dev/null || true
   cp -f "$AUD_BUILD/sdw_utils/snd-soc-sdw-utils.ko" "$AUD_BUILD/intel/boards/snd-soc-sof-sdw.ko" "/lib/modules/$KVER/updates/" 2>/dev/null || true
   rm -rf "$AUD_BUILD"
 fi
-if [[ -d "$SELF_DIR/audio-mods/firmware/realtek/rt1320" ]]; then
+if [[ -d "$AUDIO_MODS_DIR/firmware/realtek/rt1320" ]]; then
   mkdir -p /lib/firmware/realtek/rt1320
-  cp -f "$SELF_DIR/audio-mods/firmware/realtek/rt1320"/*.dat /lib/firmware/realtek/rt1320/ 2>/dev/null || true
+  cp -f "$AUDIO_MODS_DIR/firmware/realtek/rt1320"/*.dat /lib/firmware/realtek/rt1320/ 2>/dev/null || true
 fi
 if [[ -d /usr/share/alsa/ucm2 ]]; then
   mkdir -p /usr/share/alsa/ucm2/codecs/rt721+rt1320
@@ -92,6 +95,9 @@ FixedBootSequence [
 ]
 
 BootSequence [
+	cset "name='rt1320-1 Brown Out Switch' 0"
+	cset "name='rt1320-1 RAE Update' 1"
+	cset "name='rt1320-1 FU21 Playback Volume' 87"
 	cset "name='rt1320-1 OT23 L Switch' 0"
 	cset "name='rt1320-1 OT23 R Switch' 0"
 	cset "name='Speaker Switch' 0,0"
@@ -113,7 +119,7 @@ options xe gsc_firmware_path="" huc_firmware_path="" wedged_mode=0 enable_psr=0
 options spi_intel_pci writeable=1
 EOF
 cat > /etc/dracut.conf.d/90-googlebook-slotb.conf <<'EOF'
-omit_drivers+=" i915 xe amdgpu radeon nouveau cxgb4 "
+omit_drivers+=" i915 xe amdgpu radeon nouveau cxgb4 iwlwifi iwlmld btintel btintel_pcie bluetooth cfg80211 mac80211 snd snd_sof snd_sof_pci_intel_ptl soundwire_bus intel_vpu "
 add_drivers+=" nvme nvme_core btrfs uas usb_storage coreboot_table framebuffer-coreboot cros_ec cros_ec_lpcs cros_ec_keyb "
 compress="zstd -19 -T0"
 EOF
@@ -121,9 +127,9 @@ EOF
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
 
-# --- build hostonly initramfs omitting blacklisted GPU firmware so it fits in Slot B ---
+# --- build hostonly initramfs omitting blacklisted GPU/Wi-Fi/BT/Audio firmware so it fits in Slot B ---
 dracut -f --hostonly --kver "$KVER" \
-  --omit-drivers "i915 xe amdgpu radeon nouveau cxgb4" \
+  --omit-drivers "i915 xe amdgpu radeon nouveau cxgb4 iwlwifi iwlmld btintel btintel_pcie bluetooth cfg80211 mac80211 snd snd_sof snd_sof_pci_intel_ptl soundwire_bus intel_vpu" \
   --add-drivers "nvme nvme_core btrfs uas usb_storage coreboot_table framebuffer-coreboot cros_ec cros_ec_lpcs cros_ec_keyb" \
   --compress "zstd -19 -T0" "$W/initramfs.img" >/dev/null
 
@@ -150,7 +156,7 @@ log "initramfs size: $SZ bytes"
 # Also inject googleboot-menu so Slot B always boots into the graphical OS selector!
 mkdir -p "$W/unpacked" "$W/split_init/usr/lib"
 (cd "$W/unpacked" && ( /usr/lib/dracut/skipcpio "$W/initramfs.img" 2>/dev/null || cat "$W/initramfs.img" ) | zstd -d | cpio -idm --quiet)
-rm -rf "$W/unpacked/usr/lib/firmware"/{xe,i915,amdgpu,radeon,nvidia,cxgb4,LENOVO,dell,HP} 2>/dev/null || true
+rm -rf "$W/unpacked/usr/lib/firmware"/{xe,i915,amdgpu,radeon,nvidia,cxgb4,LENOVO,dell,HP,iwlwifi*,intel/ibt*,intel/vpu*,intel/sof*,intel/ish*,intel/qat*,qat*,cavium,qcom,mediatek,ath*,brcm} 2>/dev/null || true
 mv "$W/unpacked/usr/lib/modules" "$W/split_init/usr/lib/modules"
 
 for menu_installer in \

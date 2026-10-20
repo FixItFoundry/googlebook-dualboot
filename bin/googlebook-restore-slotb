@@ -299,7 +299,7 @@ sync
 
 # 4. Set Slot B active in GPT so Depthcharge boots googleboot-menu
 log "Setting active boot slot to Slot B (googleboot-menu)..."
-if command -v bootctl >/dev/null 2>&1; then
+if [ "$IS_ANDROID" = "1" ] && command -v bootctl >/dev/null 2>&1; then
   bootctl set-active-boot-slot 1
 elif [ -x "$BACKUP_DIR/googleboot-menu" ]; then
   "$BACKUP_DIR/googleboot-menu" --switch-slot b --disk "$DISK_DEV"

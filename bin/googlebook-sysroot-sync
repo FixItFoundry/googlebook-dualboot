@@ -88,12 +88,41 @@ if [ -f /sysroot/etc/selinux/config ]; then
   sed -i 's/^SELINUX=enforcing/SELINUX=permissive/' /sysroot/etc/selinux/config 2>/dev/null || true
 fi
 
-# 4. Install coreboot framebuffer modules & GPU staging rules into /sysroot
+# 4. Install coreboot framebuffer modules, SoundWire audio modules & GPU staging rules into /sysroot
 KVER=$(uname -r)
 if [ -d "/sysroot/lib/modules/$KVER" ]; then
-  mkdir -p "/sysroot/lib/modules/$KVER/extra"
+  mkdir -p "/sysroot/lib/modules/$KVER/extra" "/sysroot/lib/modules/$KVER/updates"
   cp -f /usr/local/lib/googlebook-mods/*.ko "/sysroot/lib/modules/$KVER/extra/" 2>/dev/null || true
+  cp -f /usr/local/lib/googlebook-audio-mods/*.ko "/sysroot/lib/modules/$KVER/updates/" 2>/dev/null || true
   chroot /sysroot depmod -a "$KVER" 2>/dev/null || true
+fi
+
+if [ -d /usr/local/share/googlebook-audio/firmware ]; then
+  mkdir -p /sysroot/lib/firmware/realtek/rt1320
+  cp -f /usr/local/share/googlebook-audio/firmware/*.dat /sysroot/lib/firmware/realtek/rt1320/ 2>/dev/null || true
+fi
+
+if [ -d /sysroot/usr/share/alsa/ucm2 ]; then
+  mkdir -p /sysroot/usr/share/alsa/ucm2/codecs/rt721+rt1320
+  cat > /sysroot/usr/share/alsa/ucm2/codecs/rt721+rt1320/init.conf << 'UCMEOF'
+# RT721 + RT1320 combo speaker specific volume control settings
+
+FixedBootSequence [
+	msleep 200
+	cset "name='rt1320-1 Brown Out Switch' 0"
+	cset "name='rt1320-1 RAE Update' 1"
+	cset "name='rt1320-1 FU21 Playback Volume' 87"
+]
+
+BootSequence [
+	cset "name='rt1320-1 OT23 L Switch' 0"
+	cset "name='rt1320-1 OT23 R Switch' 0"
+	cset "name='Speaker Switch' 0,0"
+]
+UCMEOF
+  if [ -f /sysroot/usr/share/alsa/ucm2/sof-soundwire/rt721.conf ]; then
+    sed -i 's/Regex "(rt721(-sdca)?)"/Regex "^(rt721(-sdca)?)$"/' /sysroot/usr/share/alsa/ucm2/sof-soundwire/rt721.conf 2>/dev/null || true
+  fi
 fi
 
 mkdir -p /sysroot/etc/modules-load.d /sysroot/etc/modprobe.d

@@ -127,6 +127,10 @@ sudo googlebook-switch-slot b
    - Anaconda's `%pre` runs without a controlling terminal on `/dev/tty3`, causing `gum`'s `/dev/tty` open to fail with `ENXIO`. [`patches/omarchy-installer.sh`](patches/omarchy-installer.sh) acquires `/dev/tty3` via `ioctl(0, TIOCSCTTY, 1)` before launching the TUI.
 4. **SDDM Wayland Greeter & Staged Intel Xe2 (`xe.ko`) Initialization**:
    - Fixes SDDM's `[Wayland] CompositorCommand` (`Hyprland --config /usr/share/sddm/hyprland.lua`), configures LUKS post-unlock `[Autologin]` for `omarchy.desktop`, symlinks `/usr/share/omarchy/bin/*` into `/usr/bin/`, and loads `xe.ko` right before `sddm.service` once `/usr/lib/firmware/xe/*` is mounted on the Btrfs root filesystem.
+5. **SoundWire Audio Bringup (`snd-soc-sdw-utils.ko` + `snd-soc-sof-sdw.ko`, RT1320 Calibration & ALSA UCM)**:
+   - On `Moonstone` (`Google_Fatcat`), the Realtek `RT721` (jack) + `RT1320` (smart amp) combo shares SoundWire Link 3 (`sdw-master-0-3`), while the internal array microphone is a 2-channel PCH DMIC (`sof-ptl-dmic-2ch-id3.tplg`).
+   - Upstream `soc_sdw_utils.c` lacked `.quirk = SOC_SDW_CODEC_MIC, .quirk_exclude = true` on `rt1320-aif2` (causing an unrouted `SDW0-Capture-SimpleJack` BE link and a 128-byte `card->components` `-ENOSPC` overflow), had an early `break;` in `asoc_sdw_mc_dailink_exit_loop()` leaving `rtd_init_done` stale across reloads, and lacked a `Google_Fatcat` DMI quirk entry (`SOC_SDW_PCH_DMIC`) in `sof_sdw.c`.
+   - [`audio-mods/`](audio-mods/) builds patched `snd-soc-sdw-utils.ko` and `snd-soc-sof-sdw.ko` out-of-tree into `/lib/modules/<kver>/updates/`, installs the Android 17 `rt1320_*Google_Moonstone*.dat` calibration files to `/lib/firmware/realtek/rt1320/`, creates `/usr/share/alsa/ucm2/codecs/rt721+rt1320/init.conf`, and anchors the `SpeakerCodec1` regex in `/usr/share/alsa/ucm2/sof-soundwire/rt721.conf`. Both [`fedomakase-googlebook-slotb`](bin/fedomakase-googlebook-slotb) and [`googlebook-sysroot-sync`](bin/googlebook-sysroot-sync) keep these synced across kernel and `alsa-ucm` updates.
 
 ---
 

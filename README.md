@@ -112,6 +112,25 @@ sudo googlebook-switch-slot b
    fastboot --set-active=a && fastboot reboot
    ```
 
+### Restoring Slot B After a Googlebook OS (Android 17) OTA or Development Flash
+When Googlebook OS (on Slot A) applies an A/B OTA update (`update_engine`), it writes the new Android build into **Slot B** (`boot_b`, `init_boot_b`, `vendor_boot_b`, `vbmeta_b`, `dtbo_b`, `pvmfw_b`, and `*_b` inside `super`) and switches the active slot to B. Meanwhile, [`googlebook-pack-slotb`](bin/googlebook-pack-slotb) automatically saves a backup copy of your Linux Slot B images in `/boot/slotb-backup/` on `p11` (unencrypted `ext4`).
+
+Run **[`googlebook-restore-slotb`](bin/googlebook-restore-slotb)** after any Googlebook OS OTA or `fastboot` flash to:
+1. **Promote the newly updated Googlebook OS from Slot B $\rightarrow$ Slot A** (`boot_b -> boot_a`, `init_boot_b -> init_boot_a`, `vendor_boot_b -> vendor_boot_a`, `vbmeta_b -> vbmeta_a`, `dtbo_b -> dtbo_a`, `pvmfw_b -> pvmfw_a`, and swap `_a` $\leftrightarrow$ `_b` in `super`'s `LpMetadata` header), and
+2. **Restore Linux's `boot_b.img`, `init_boot_b.img`, and `vendor_boot_b.img`** from `/boot/slotb-backup/` on `p11` back into Slot B and re-activate `googleboot-menu`:
+
+```bash
+# Option 1: From your dev machine over ADB (after an OTA or Android flash):
+./bin/googlebook-restore-slotb --adb --reboot
+
+# Option 2: Directly on the Googlebook inside an Android 17 root shell (adb root / su):
+mount -t ext4 -o ro /dev/block/nvme0n1p11 /data/local/tmp/mnt && \
+  sh /data/local/tmp/mnt/slotb-backup/googlebook-restore-slotb --reboot
+
+# Option 3: From Fastboot using a local backup folder (--no-promote if you flashed Slot A directly):
+./bin/googlebook-restore-slotb --fastboot ./slotb-backup --reboot
+```
+
 ---
 
 ## 5. Technical Reference: Key Fixes & Engineering Notes

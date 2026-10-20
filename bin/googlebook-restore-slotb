@@ -1,0 +1,317 @@
+#!/bin/sh
+# googlebook-restore-slotb
+# Post-OTA / Post-Flash Wrapper for Acer Googlebook 14 (Moonstone)
+#
+# Purpose:
+#   When developing for or updating Googlebook OS (Android 17):
+#   1. An Android A/B OTA (update_engine) running on Slot A writes the new
+#      Googlebook OS into Slot B (boot_b, init_boot_b, vendor_boot_b, vbmeta_b,
+#      dtbo_b, pvmfw_b, and *_b inside super) and switches the active slot to B.
+#   2. Or a `fastboot flashall` / `fastboot update` flashes Slot A (and/or B)
+#      and sets the active slot to A.
+#
+#   This script:
+#   - Can run ON THE DEVICE (inside an Android 17 `adb root` / `su` shell or Linux)
+#     OR FROM A HOST COMPUTER (`--adb [serial]` or `--fastboot [target] [backup-dir]`).
+#   - If Slot B currently contains a newly-installed Googlebook OS OTA (instead of
+#     Linux's googleboot-menu), it automatically PROMOTES that updated Android build
+#     from Slot B -> Slot A (copying boot_b->boot_a, init_boot_b->init_boot_a,
+#     vendor_boot_b->vendor_boot_a, vbmeta_b->vbmeta_a, dtbo_b->dtbo_a,
+#     pvmfw_b->pvmfw_a, and swapping _a <-> _b in super's LpMetadata headers)
+#     so Slot A boots the newly updated Googlebook OS!
+#   - Then restores Linux's saved Slot B images (`boot_b.img`, `init_boot_b.img`,
+#     `vendor_boot_b.img`) from `/boot/slotb-backup` on p11 (`ext4`) back into
+#     Slot B (p14, p19, p21) and sets Slot B (`googleboot-menu`) active.
+#
+# Usage:
+#   From host over ADB after an OTA (recommended):
+#     ./bin/googlebook-restore-slotb --adb [device-serial-or-ip] [--no-promote] [--reboot]
+#   From host over Fastboot (flashes saved slotb-backup dir):
+#     ./bin/googlebook-restore-slotb --fastboot [tcp:IP|serial] [slotb-backup-dir] [--reboot]
+#   On-device (Android `adb root` / `su` shell, or Linux root):
+#     sh /data/local/tmp/googlebook-restore-slotb [--no-promote] [--reboot]
+
+set -eu
+
+PROMOTE_OTA=1
+DO_REBOOT=0
+MODE="on-device"
+TARGET=""
+BACKUP_DIR=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-promote) PROMOTE_OTA=0; shift ;;
+    --reboot|-r)  DO_REBOOT=1; shift ;;
+    --adb)
+      MODE="adb"
+      shift
+      if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
+        TARGET="$1"; shift
+      fi
+      ;;
+    --fastboot)
+      MODE="fastboot"
+      shift
+      if [ $# -gt 0 ] && [ "${1#-}" = "$1" ] && [ ! -d "$1" ]; then
+        TARGET="$1"; shift
+      fi
+      if [ $# -gt 0 ] && [ -d "$1" ]; then
+        BACKUP_DIR="$1"; shift
+      fi
+      ;;
+    -h|--help)
+      sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    *)
+      if [ -d "$1" ]; then
+        BACKUP_DIR="$1"; shift
+      else
+        echo "Unknown option: $1" >&2; exit 1
+      fi
+      ;;
+  esac
+done
+
+log() { echo "[restore-slotb] $*"; }
+
+promote_lp_metadata_file() {
+  python3 - "$1" << 'PY'
+import sys, struct, hashlib
+
+path = sys.argv[1]
+with open(path, "r+b") as f:
+    f.seek(4096)
+    geom = f.read(4096)
+    magic, struct_size, sha, max_size, slot_count, block_size = struct.unpack("<II32sIII", geom[:52])
+    if magic != 0x616c4467:
+        sys.exit(0)
+    off1 = 4096 + 4096 + max_size * 1
+    f.seek(off1)
+    hdr1 = bytearray(f.read(256))
+    h_magic, major, minor, h_size = struct.unpack("<IHHI", hdr1[:12])
+    tables_size = struct.unpack("<I", hdr1[44:48])[0]
+    parts_off, parts_num, parts_es = struct.unpack("<III", hdr1[80:92])
+    exts_off, exts_num, exts_es = struct.unpack("<III", hdr1[92:104])
+    groups_off, groups_num, groups_es = struct.unpack("<III", hdr1[104:116])
+    f.seek(off1 + h_size)
+    tables1 = bytearray(f.read(tables_size))
+
+    b_exts = 0
+    for i in range(parts_num):
+        po = parts_off + i * parts_es
+        name = tables1[po:po+36].split(b"\x00")[0].decode("ascii", "replace")
+        _, _, n_ext, _ = struct.unpack("<IIII", tables1[po+36:po+52])
+        if name.endswith("_b") and n_ext > 0:
+            b_exts += n_ext
+
+    if b_exts > 0:
+        print(f"[restore-slotb] Promoting super LpMetadata (_b -> _a, {b_exts} extents)...")
+        for i in range(parts_num):
+            po = parts_off + i * parts_es
+            name = tables1[po:po+36].split(b"\x00")[0].decode("ascii", "replace")
+            if name.endswith("_a"):
+                new_name = name[:-2] + "_b"
+            elif name.endswith("_b"):
+                new_name = name[:-2] + "_a"
+            else:
+                continue
+            tables1[po:po+36] = new_name.encode("ascii").ljust(36, b"\x00")
+        for i in range(groups_num):
+            go = groups_off + i * groups_es
+            gname = tables1[go:go+36].split(b"\x00")[0].decode("ascii", "replace")
+            if gname.endswith("_a"):
+                new_gname = gname[:-2] + "_b"
+            elif gname.endswith("_b"):
+                new_gname = gname[:-2] + "_a"
+            else:
+                continue
+            tables1[go:go+36] = new_gname.encode("ascii").ljust(36, b"\x00")
+
+        hdr1[48:80] = hashlib.sha256(tables1).digest()
+        hdr1[12:44] = b"\x00" * 32
+        hdr1[12:44] = hashlib.sha256(hdr1[:h_size]).digest()
+
+        for s in range(slot_count):
+            for base in (4096 + 4096, 4096 + 4096 + max_size * slot_count):
+                off = base + max_size * s
+                f.seek(off)
+                f.write(hdr1[:h_size])
+                f.write(tables1)
+        f.flush()
+PY
+}
+
+# ---------------------------------------------------------------------------
+# Host Mode 1: --adb (push this script to /data/local/tmp and run as root)
+# ---------------------------------------------------------------------------
+if [ "$MODE" = "adb" ]; then
+  ADB_ARGS=""
+  [ -n "$TARGET" ] && ADB_ARGS="-s $TARGET"
+  log "Connecting via ADB ${TARGET:+($TARGET)}..."
+  adb $ADB_ARGS root >/dev/null 2>&1 || true
+  adb $ADB_ARGS wait-for-device
+
+  # If promoting OTA and device lacks python3, promote super LpMetadata header via host python3
+  if [ "$PROMOTE_OTA" = "1" ] && command -v python3 >/dev/null 2>&1; then
+    SLOTB_IS_LINUX=$(adb $ADB_ARGS shell "dd if=/dev/block/nvme0n1p21 bs=4096 count=16 2>/dev/null | grep -c -E 'androidboot\.(googleboot|fedomakase)=1' || true" | tr -d '\r\n ')
+    if [ "${SLOTB_IS_LINUX:-0}" = "0" ]; then
+      TMP_LP=$(mktemp)
+      adb $ADB_ARGS shell "snapshotctl merge 2>/dev/null || true; dd if=/dev/block/nvme0n1p25 bs=4096 count=72 2>/dev/null" > "$TMP_LP"
+      promote_lp_metadata_file "$TMP_LP"
+      adb $ADB_ARGS push "$TMP_LP" /data/local/tmp/lp_hdr.bin >/dev/null
+      adb $ADB_ARGS shell "dd if=/data/local/tmp/lp_hdr.bin of=/dev/block/nvme0n1p25 bs=4096 count=72 conv=notrunc,fsync 2>/dev/null && rm -f /data/local/tmp/lp_hdr.bin"
+      rm -f "$TMP_LP"
+    fi
+  fi
+
+  adb $ADB_ARGS push "$0" /data/local/tmp/googlebook-restore-slotb >/dev/null
+  REMOTE_FLAGS=""
+  [ "$PROMOTE_OTA" = "0" ] && REMOTE_FLAGS="$REMOTE_FLAGS --no-promote"
+  [ "$DO_REBOOT" = "1" ] && REMOTE_FLAGS="$REMOTE_FLAGS --reboot"
+  exec adb $ADB_ARGS shell "sh /data/local/tmp/googlebook-restore-slotb $REMOTE_FLAGS"
+fi
+
+# ---------------------------------------------------------------------------
+# Host Mode 2: --fastboot (flash boot_b, init_boot_b, vendor_boot_b via fastboot)
+# ---------------------------------------------------------------------------
+if [ "$MODE" = "fastboot" ]; then
+  FB_ARGS=""
+  [ -n "$TARGET" ] && FB_ARGS="-s $TARGET"
+  [ -z "$BACKUP_DIR" ] && BACKUP_DIR="./slotb-backup"
+  for f in boot_b.img init_boot_b.img vendor_boot_b.img; do
+    [ -f "$BACKUP_DIR/$f" ] || { echo "Error: missing $BACKUP_DIR/$f" >&2; exit 1; }
+  done
+  log "Flashing Linux Slot B from $BACKUP_DIR via fastboot ${TARGET:+($TARGET)}..."
+  fastboot $FB_ARGS flash boot_b "$BACKUP_DIR/boot_b.img"
+  fastboot $FB_ARGS flash init_boot_b "$BACKUP_DIR/init_boot_b.img"
+  fastboot $FB_ARGS flash vendor_boot_b "$BACKUP_DIR/vendor_boot_b.img"
+  fastboot $FB_ARGS --set-active=b
+  [ "$DO_REBOOT" = "1" ] && fastboot $FB_ARGS reboot
+  log "Done! Slot B restored."
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# On-Device Mode (runs inside Android 17 root shell or Linux root shell)
+# ---------------------------------------------------------------------------
+if [ "$(id -u)" != "0" ]; then
+  echo "Error: must run as root (su / sudo / adb root)" >&2
+  exit 1
+fi
+
+if [ -b /dev/block/nvme0n1p11 ]; then
+  DEV_PREFIX="/dev/block/nvme0n1p"
+  DISK_DEV="/dev/block/nvme0n1"
+  IS_ANDROID=1
+elif [ -b /dev/nvme0n1p11 ]; then
+  DEV_PREFIX="/dev/nvme0n1p"
+  DISK_DEV="/dev/nvme0n1"
+  IS_ANDROID=0
+else
+  echo "Error: cannot find nvme0n1p11 (/dev/block/nvme0n1p11 or /dev/nvme0n1p11)" >&2
+  exit 1
+fi
+
+P_LINUX_BOOT="${DEV_PREFIX}11"
+P_BOOT_A="${DEV_PREFIX}13"
+P_BOOT_B="${DEV_PREFIX}14"
+P_VBMETA_A="${DEV_PREFIX}15"
+P_VBMETA_B="${DEV_PREFIX}16"
+P_INIT_BOOT_A="${DEV_PREFIX}18"
+P_INIT_BOOT_B="${DEV_PREFIX}19"
+P_VENDOR_BOOT_A="${DEV_PREFIX}20"
+P_VENDOR_BOOT_B="${DEV_PREFIX}21"
+P_DTBO_A="${DEV_PREFIX}22"
+P_DTBO_B="${DEV_PREFIX}23"
+P_SUPER="${DEV_PREFIX}25"
+P_PVMFW_A="${DEV_PREFIX}26"
+P_PVMFW_B="${DEV_PREFIX}27"
+
+# 1. Mount Linux /boot (p11, ext4) if not already mounted to access /boot/slotb-backup
+MNT_BOOT=""
+CLEANUP_MNT=0
+if [ "$IS_ANDROID" = "0" ] && [ -d /boot/slotb-backup ]; then
+  MNT_BOOT="/boot"
+else
+  MNT_BOOT="/data/local/tmp/linux_boot_mnt"
+  [ -d /data/local/tmp ] || MNT_BOOT="/tmp/linux_boot_mnt"
+  mkdir -p "$MNT_BOOT"
+  mount -t ext4 -o ro "$P_LINUX_BOOT" "$MNT_BOOT"
+  CLEANUP_MNT=1
+fi
+trap '[ "$CLEANUP_MNT" = "1" ] && umount "$MNT_BOOT" 2>/dev/null || true' EXIT
+
+[ -z "$BACKUP_DIR" ] && BACKUP_DIR="$MNT_BOOT/slotb-backup"
+for f in boot_b.img init_boot_b.img vendor_boot_b.img; do
+  if [ ! -f "$BACKUP_DIR/$f" ]; then
+    echo "Error: $BACKUP_DIR/$f not found on p11. Run googlebook-pack-slotb in Linux first." >&2
+    exit 1
+  fi
+done
+
+# 2. Check if Slot B was overwritten by an Android OTA (vendor_boot_b lacks googleboot/fedomakase marker)
+SLOTB_IS_LINUX=0
+if dd if="$P_VENDOR_BOOT_B" bs=4096 count=16 2>/dev/null | grep -q -E "androidboot\.(googleboot|fedomakase)=1"; then
+  SLOTB_IS_LINUX=1
+fi
+
+if [ "$SLOTB_IS_LINUX" = "0" ] && [ "$PROMOTE_OTA" = "1" ]; then
+  log "Detected Android OTA / Googlebook OS image in Slot B!"
+  if [ "$IS_ANDROID" = "1" ] && command -v snapshotctl >/dev/null 2>&1; then
+    log "Checking Virtual A/B snapshot merge state..."
+    snapshotctl merge 2>/dev/null || true
+  fi
+
+  log "Promoting updated Googlebook OS partitions from Slot B -> Slot A..."
+  for pair in \
+    "$P_BOOT_B:$P_BOOT_A:boot" \
+    "$P_INIT_BOOT_B:$P_INIT_BOOT_A:init_boot" \
+    "$P_VENDOR_BOOT_B:$P_VENDOR_BOOT_A:vendor_boot" \
+    "$P_VBMETA_B:$P_VBMETA_A:vbmeta" \
+    "$P_DTBO_B:$P_DTBO_A:dtbo" \
+    "$P_PVMFW_B:$P_PVMFW_A:pvmfw"; do
+    src="${pair%%:*}"
+    rest="${pair#*:}"
+    dst="${rest%%:*}"
+    name="${rest#*:}"
+    if [ -b "$src" ] && [ -b "$dst" ]; then
+      log "  copying ${name}_b -> ${name}_a"
+      dd if="$src" of="$dst" bs=1048576 conv=fsync 2>/dev/null
+    fi
+  done
+
+  if command -v python3 >/dev/null 2>&1; then
+    promote_lp_metadata_file "$P_SUPER"
+  fi
+fi
+
+# 3. Restore Linux boot_b.img, init_boot_b.img, vendor_boot_b.img to Slot B
+log "Restoring Linux Slot B boot images from $BACKUP_DIR..."
+dd if="$BACKUP_DIR/boot_b.img" of="$P_BOOT_B" bs=1048576 conv=fsync 2>/dev/null
+dd if="$BACKUP_DIR/init_boot_b.img" of="$P_INIT_BOOT_B" bs=1048576 conv=fsync 2>/dev/null
+dd if="$BACKUP_DIR/vendor_boot_b.img" of="$P_VENDOR_BOOT_B" bs=1048576 conv=fsync 2>/dev/null
+if [ -f "$BACKUP_DIR/vbmeta_b.img" ]; then
+  dd if="$BACKUP_DIR/vbmeta_b.img" of="$P_VBMETA_B" bs=65536 conv=fsync 2>/dev/null
+fi
+sync
+
+# 4. Set Slot B active in GPT so Depthcharge boots googleboot-menu
+log "Setting active boot slot to Slot B (googleboot-menu)..."
+if command -v bootctl >/dev/null 2>&1; then
+  bootctl set-active-boot-slot 1
+elif [ -x "$BACKUP_DIR/googleboot-menu" ]; then
+  "$BACKUP_DIR/googleboot-menu" --switch-slot b --disk "$DISK_DEV"
+elif [ -x /usr/local/bin/googleboot-menu ]; then
+  /usr/local/bin/googleboot-menu --switch-slot b --disk "$DISK_DEV"
+elif command -v sgdisk >/dev/null 2>&1; then
+  sgdisk --attributes=15:=0001000000000000 --attributes=16:=0102000000000000 \
+         --attributes=13:=0001000000000000 --attributes=14:=0102000000000000 "$DISK_DEV" >/dev/null
+fi
+
+log "Slot B restored! Next boot will launch googleboot-menu (Linux + updated Googlebook OS)."
+if [ "$DO_REBOOT" = "1" ]; then
+  log "Rebooting..."
+  reboot
+fi

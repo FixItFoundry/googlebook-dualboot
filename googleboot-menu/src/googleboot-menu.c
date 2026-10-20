@@ -185,7 +185,7 @@ static void init_default_theme(theme_config_t *t) {
     t->card_height = 560;
     t->card_radius = 28;
     t->card_gap    = 44;
-    t->timeout_sec = 6;
+    t->timeout_sec = 3;
 }
 
 static void trim_str(char *s) {
@@ -495,12 +495,12 @@ static void prettify_label(const char *in, char *out, size_t out_sz, bool is_sub
         out[0] = '\0';
         return;
     }
-    if (strcasecmp(in, "FEDOMAKASE LINUX") == 0) {
-        snprintf(out, out_sz, "Fedomakase Linux");
+    if (strcasecmp(in, "FEDOMAKASE LINUX") == 0 || strcasecmp(in, "FEDORA") == 0 || strcasecmp(in, "FEDORA LINUX") == 0) {
+        snprintf(out, out_sz, "Fedora");
         return;
     }
-    if (strcasecmp(in, "ANDROID 17") == 0) {
-        snprintf(out, out_sz, "Android 17");
+    if (strcasecmp(in, "ANDROID 17") == 0 || strcasecmp(in, "GOOGLEBOOK OS") == 0) {
+        snprintf(out, out_sz, "Googlebook OS");
         return;
     }
     if (strcasecmp(in, "WINDOWS 11") == 0) {
@@ -515,8 +515,8 @@ static void prettify_label(const char *in, char *out, size_t out_sz, bool is_sub
         snprintf(out, out_sz, "Fedora 44 • Omarchy Hyprland");
         return;
     }
-    if (strcasecmp(in, "ALUMINUM OS - SLOT A (ONE-SHOT)") == 0) {
-        snprintf(out, out_sz, "Aluminum OS • Slot A (One-Shot)");
+    if (strcasecmp(in, "ALUMINUM OS - SLOT A (ONE-SHOT)") == 0 || strcasecmp(in, "ANDROID 17 - SLOT A (ONE-SHOT)") == 0) {
+        snprintf(out, out_sz, "Android 17 • Slot A (One-Shot)");
         return;
     }
     if (strcasecmp(in, "UEFI BRIDGE -> BOOTMGFW.EFI") == 0) {
@@ -681,23 +681,67 @@ static void draw_lock_icon(canvas_t *cv, float cx, float cy, float size, color_t
     draw_sdf_circle(cv, cx, by + bh * 0.46f, size * 0.085f, bg_hole, none, 0);
 }
 
+/* Official Fedora infinity-'f' emblem rendered via exact tangent circle + stem SDFs */
+static void draw_fedora_logo(canvas_t *cv, float cx, float cy, float radius) {
+    float sf = radius / 84.0f;
+    color_t fed_blue = parse_hex("#3C6EB4", 255);
+    color_t fed_ring = parse_hex("#51A2DA", 220);
+    color_t white    = parse_hex("#FFFFFF", 255);
+    color_t none     = {0, 0, 0, 0};
+
+    /* Outer badge circle with Fedora Blue fill + teardrop bottom-left corner */
+    float br = radius * 0.72f;
+    draw_sdf_rounded_rect(cv, cx - br, cy - br * 0.1f, br * 1.1f, br * 1.1f, br * 0.32f, fed_blue, none, 0);
+    draw_sdf_circle(cv, cx, cy, br, fed_blue, fed_ring, 2.5f * sf);
+
+    /* Infinity 'f' geometry: two loops of radius R tangent to x = cx and y = cy */
+    float R = radius * 0.195f;
+    float stroke = 8.5f * sf;
+    if (stroke < 2.2f) stroke = 2.2f;
+    float ox = cx - R * 0.12f;
+    float oy = cy + R * 0.12f;
+
+    /* Bottom-left loop centered at (ox - R, oy + R) */
+    draw_sdf_circle(cv, ox - R, oy + R, R, none, white, stroke);
+    /* Top-right hook loop centered at (ox + R, oy - R) */
+    int x0 = (int)(ox - 2), x1 = (int)(ox + 2.4f * R + stroke + 2);
+    int y0 = (int)(oy - 2.4f * R - stroke - 2), y1 = (int)(oy + 2);
+    for (int py = y0; py <= y1; py++) {
+        for (int px = x0; px <= x1; px++) {
+            float dx = (px + 0.5f) - (ox + R);
+            float dy = (py + 0.5f) - (oy - R);
+            float deg = atan2f(dy, dx) * (180.0f / (float)M_PI);
+            /* Open bottom-right quadrant of top hook (25 deg to 165 deg) so it forms 'f' hook */
+            if (deg > 28.0f && deg < 172.0f) continue;
+            float d = fabsf(sqrtf(dx * dx + dy * dy) - R) - stroke * 0.5f;
+            if (d < 0.6f) {
+                float cov = 0.6f - d; if (cov > 1.0f) cov = 1.0f;
+                color_t c = white; c.a = (uint8_t)(255.0f * cov);
+                blend_pixel(cv, px, py, c);
+            }
+        }
+    }
+    /* Central vertical stem and horizontal crossbar */
+    draw_sdf_segment(cv, ox, oy - R, ox, oy + R, stroke * 0.5f, white);
+    draw_sdf_segment(cv, ox - R, oy, ox + R * 1.12f, oy, stroke * 0.5f, white);
+}
+
 static void draw_os_badge(canvas_t *cv, const char *os_type, float cx, float cy, float radius) {
     float sf = radius / 84.0f;
     color_t ring = parse_hex("#8AB4F8", 255);
     color_t none = {0, 0, 0, 0};
 
-    if (strcmp(os_type, "omarchy") == 0)      ring = parse_hex("#8AB4F8", 255); /* Google Blue */
-    else if (strcmp(os_type, "fedora") == 0)  ring = parse_hex("#669DF6", 255);
+    if (strcmp(os_type, "omarchy") == 0 || strcmp(os_type, "fedora") == 0) ring = parse_hex("#51A2DA", 255);
     else if (strcmp(os_type, "arch") == 0)    ring = parse_hex("#78D9EC", 255);
     else if (strcmp(os_type, "ubuntu") == 0)  ring = parse_hex("#FCAD70", 255);
-    else if (strcmp(os_type, "android") == 0) ring = parse_hex("#81C995", 255); /* Google Green */
+    else if (strcmp(os_type, "android") == 0) ring = parse_hex("#8AB4F8", 255);
     else if (strcmp(os_type, "windows") == 0) ring = parse_hex("#4285F4", 255);
-    else if (strcmp(os_type, "usb") == 0)     ring = parse_hex("#FDD663", 255); /* Google Yellow */
+    else if (strcmp(os_type, "usb") == 0)     ring = parse_hex("#FDD663", 255);
 
     color_t fill = ring;
-    fill.a = 30;
+    fill.a = 26;
     color_t ring_border = ring;
-    ring_border.a = 90;
+    ring_border.a = 80;
     float rw = 2.5f * sf; if (rw < 1.5f) rw = 1.5f;
     draw_sdf_circle(cv, cx, cy, radius, fill, ring_border, rw);
 
@@ -709,45 +753,18 @@ static void draw_os_badge(canvas_t *cv, const char *os_type, float cx, float cy,
         draw_sdf_rounded_rect(cv, cx + g/2,     cy - s - g/2, s, s, 5.0f * sf, ring, none, 0);
         draw_sdf_rounded_rect(cv, cx - s - g/2, cy + g/2,     s, s, 5.0f * sf, ring, none, 0);
         draw_sdf_rounded_rect(cv, cx + g/2,     cy + g/2,     s, s, 5.0f * sf, ring, none, 0);
-    } else if (strcmp(os_type, "omarchy") == 0 || strcmp(os_type, "fedora") == 0 || strcmp(os_type, "arch") == 0) {
-        /* Hyprland / Omarchy tiling desktop layout + terminal chevron */
+    } else if (strcmp(os_type, "omarchy") == 0 || strcmp(os_type, "fedora") == 0) {
+        /* Official Fedora infinity-'f' emblem */
+        draw_fedora_logo(cv, cx, cy, radius);
+    } else if (strcmp(os_type, "arch") == 0) {
         float w = radius * 0.88f, h = radius * 0.68f;
         draw_sdf_rounded_rect(cv, cx - w/2, cy - h/2, w * 0.54f, h, 8.0f * sf, ring, none, 0);
         color_t sub_pane = ring; sub_pane.a = 175;
         draw_sdf_rounded_rect(cv, cx + w * 0.08f, cy - h/2, w * 0.42f, h * 0.45f, 7.0f * sf, sub_pane, none, 0);
         draw_sdf_rounded_rect(cv, cx + w * 0.08f, cy + h * 0.05f, w * 0.42f, h * 0.45f, 7.0f * sf, sub_pane, none, 0);
-        /* Terminal prompt '>' inside primary pane */
-        color_t dark = parse_hex("#202124", 240);
-        float px = cx - w * 0.32f, py = cy;
-        draw_sdf_segment(cv, px - 6.0f * sf, py - 8.0f * sf, px + 3.0f * sf, py, 2.2f * sf, dark);
-        draw_sdf_segment(cv, px + 3.0f * sf, py, px - 6.0f * sf, py + 8.0f * sf, 2.2f * sf, dark);
     } else if (strcmp(os_type, "android") == 0) {
-        /* Authentic Android robot head vector icon (dome + antennae + eyes) */
-        float hr = radius * 0.44f;
-        float hy = cy + radius * 0.16f;
-        /* Antennae */
-        draw_sdf_segment(cv, cx - hr * 0.45f, hy - hr * 0.65f, cx - hr * 0.78f, hy - hr * 1.15f, 3.0f * sf, ring);
-        draw_sdf_segment(cv, cx + hr * 0.45f, hy - hr * 0.65f, cx + hr * 0.78f, hy - hr * 1.15f, 3.0f * sf, ring);
-        /* Semicircle dome head */
-        int x0 = (int)(cx - hr - 2), x1 = (int)(cx + hr + 2);
-        int y0 = (int)(hy - hr - 2), y1 = (int)(hy + 4 * sf);
-        for (int py = y0; py <= y1; py++) {
-            for (int px = x0; px <= x1; px++) {
-                float dx = (px + 0.5f) - cx;
-                float dy = (py + 0.5f) - hy;
-                float dc = sqrtf(dx * dx + dy * dy) - hr;
-                float d = (dy > 0.0f) ? (dc > dy ? dc : dy) : dc;
-                if (d < 0.5f) {
-                    float cov = 0.5f - d; if (cov > 1.0f) cov = 1.0f;
-                    color_t c = ring; c.a = (uint8_t)(ring.a * cov);
-                    blend_pixel(cv, px, py, c);
-                }
-            }
-        }
-        /* Eyes */
-        color_t eye = parse_hex("#202124", 255);
-        draw_sdf_circle(cv, cx - hr * 0.42f, hy - hr * 0.42f, 4.2f * sf, eye, none, 0);
-        draw_sdf_circle(cv, cx + hr * 0.42f, hy - hr * 0.42f, 4.2f * sf, eye, none, 0);
+        /* Official 4-Color Googlebook OS Emblem */
+        draw_google_g_logo(cv, cx, cy, radius * 0.56f);
     } else if (strcmp(os_type, "usb") == 0) {
         float uw = radius * 0.48f, uh = radius * 0.72f;
         draw_sdf_rounded_rect(cv, cx - uw/2, cy - uh * 0.22f, uw, uh * 0.74f, 8.0f * sf, ring, none, 0);
@@ -815,8 +832,11 @@ static void render_ui(canvas_t *cv, const theme_config_t *t,
     float header_y = h * 0.115f;
 
     draw_google_g_logo(cv, group_x + logo_r, header_y + 24.0f * sf, logo_r);
-    draw_text_gs(cv, brand_title, group_x + logo_r * 2.0f + header_gap, header_y,
-                 title_px, 0, t->text, 0.5f * sf);
+    /* Render "Googlebook" header wordmark in Bold */
+    float bx = group_x + logo_r * 2.0f + header_gap;
+    draw_text_gs(cv, brand_title, bx, header_y, title_px, 0, t->text, 1.2f * sf);
+    draw_text_gs(cv, brand_title, bx + 1.35f * sf, header_y, title_px, 0, t->text, 1.2f * sf);
+    draw_text_gs(cv, brand_title, bx + 0.65f * sf, header_y - 0.55f * sf, title_px, 0, t->text, 1.2f * sf);
 
     draw_google_four_color_bar(cv, w * 0.5f, h * 0.175f, sf);
     draw_text_gs(cv, brand_sub, w * 0.5f, h * 0.205f, sub_px, 1, t->subtext, 0.2f * sf);
@@ -944,7 +964,7 @@ static void render_ui(canvas_t *cv, const theme_config_t *t,
 
         char modal_sub[256];
         const char *ldev = (entries[selected].luks_dev[0]) ? entries[selected].luks_dev : "/dev/nvme0n1p32";
-        snprintf(modal_sub, sizeof(modal_sub), "Unlock encrypted disk (%.120s) to start Fedomakase Linux", ldev);
+        snprintf(modal_sub, sizeof(modal_sub), "Unlock encrypted disk (%.120s) to start Fedora", ldev);
         draw_text_gs(cv, modal_sub, w * 0.5f, my + 174.0f * sf, 23.0f * sf, 1, t->subtext, 0.1f * sf);
 
         /* Material Outlined Password Input Field */
@@ -1277,36 +1297,63 @@ static int load_boot_entries(boot_entry_t *entries, int max_entries, const char 
 
     if (count == 0) {
         snprintf(entries[0].id, sizeof(entries[0].id), "fedomakase");
-        snprintf(entries[0].title, sizeof(entries[0].title), "Fedomakase Linux");
+        snprintf(entries[0].title, sizeof(entries[0].title), "Fedora");
         snprintf(entries[0].subtitle, sizeof(entries[0].subtitle), "Fedora 44 • Omarchy Hyprland");
-        snprintf(entries[0].os_type, sizeof(entries[0].os_type), "omarchy");
+        snprintf(entries[0].os_type, sizeof(entries[0].os_type), "fedora");
         entries[0].needs_luks = true;
         snprintf(entries[0].luks_dev, sizeof(entries[0].luks_dev), "/dev/nvme0n1p32");
         snprintf(entries[0].action_cmd, sizeof(entries[0].action_cmd), "/usr/local/bin/googleboot-scan --boot fedomakase");
 
         snprintf(entries[1].id, sizeof(entries[1].id), "android");
-        snprintf(entries[1].title, sizeof(entries[1].title), "Android 17");
-        snprintf(entries[1].subtitle, sizeof(entries[1].subtitle), "Aluminum OS • Slot A (One-Shot)");
+        snprintf(entries[1].title, sizeof(entries[1].title), "Googlebook OS");
+        snprintf(entries[1].subtitle, sizeof(entries[1].subtitle), "Android 17 • Slot A (One-Shot)");
         snprintf(entries[1].os_type, sizeof(entries[1].os_type), "android");
         entries[1].needs_luks = false;
         snprintf(entries[1].action_cmd, sizeof(entries[1].action_cmd), "/usr/local/bin/googleboot-scan --boot android");
-
-        snprintf(entries[2].id, sizeof(entries[2].id), "windows");
-        snprintf(entries[2].title, sizeof(entries[2].title), "Windows 11");
-        snprintf(entries[2].subtitle, sizeof(entries[2].subtitle), "UEFI Bridge • bootmgfw.efi");
-        snprintf(entries[2].os_type, sizeof(entries[2].os_type), "windows");
-        entries[2].needs_luks = false;
-        snprintf(entries[2].action_cmd, sizeof(entries[2].action_cmd), "/usr/local/bin/googleboot-scan --boot windows");
-
-        snprintf(entries[3].id, sizeof(entries[3].id), "usb");
-        snprintf(entries[3].title, sizeof(entries[3].title), "Live USB / ISO");
-        snprintf(entries[3].subtitle, sizeof(entries[3].subtitle), "External USB • Live ISO");
-        snprintf(entries[3].os_type, sizeof(entries[3].os_type), "usb");
-        entries[3].needs_luks = false;
-        snprintf(entries[3].action_cmd, sizeof(entries[3].action_cmd), "/usr/local/bin/googleboot-scan --boot usb");
-        count = 4;
+        count = 2;
     }
     return count;
+}
+
+static int set_gbb_short_delay(const char *path) {
+    int fd = open(path, O_RDWR);
+    if (fd < 0) {
+        perror("open GBB image/device");
+        return 1;
+    }
+    off_t sz = lseek(fd, 0, SEEK_END);
+    if (sz <= 128) {
+        close(fd);
+        return 1;
+    }
+    uint8_t *buf = malloc((size_t)sz);
+    if (!buf || pread(fd, buf, (size_t)sz, 0) != (ssize_t)sz) {
+        free(buf);
+        close(fd);
+        return 1;
+    }
+    int updated = 0;
+    for (size_t off = 0; off + 128 <= (size_t)sz; off += 4096) {
+        if (memcmp(buf + off, "$GBB", 4) == 0) {
+            uint16_t maj = *(uint16_t *)(buf + off + 4);
+            uint16_t min = *(uint16_t *)(buf + off + 6);
+            uint32_t hsz = *(uint32_t *)(buf + off + 8);
+            uint32_t flg = *(uint32_t *)(buf + off + 12);
+            if (maj == 1 && min >= 1 && hsz == 128) {
+                uint32_t new_flg = flg | 0x00000001u; /* GBB_FLAG_DEV_SCREEN_SHORT_DELAY (2s) */
+                if (new_flg != flg) {
+                    pwrite(fd, &new_flg, sizeof(new_flg), (off_t)(off + 12));
+                    fsync(fd);
+                }
+                printf("GBB header at 0x%zx: flags 0x%08x -> 0x%08x (2s bootloader delay active)\n", off, flg, new_flg);
+                updated = 1;
+                break;
+            }
+        }
+    }
+    free(buf);
+    close(fd);
+    return updated ? 0 : 1;
 }
 
 int main(int argc, char **argv) {
@@ -1314,6 +1361,7 @@ int main(int argc, char **argv) {
     const char *preview_png = NULL;
     const char *entries_file = NULL;
     const char *slot_mode = NULL;
+    const char *gbb_path = NULL;
     const char *disk_path = "/dev/nvme0n1";
     bool slot_reboot = false;
     bool modal_preview = false;
@@ -1324,10 +1372,14 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--entries") == 0 && i + 1 < argc) entries_file = argv[++i];
         else if (strcmp(argv[i], "--preview-luks") == 0) modal_preview = true;
         else if (strcmp(argv[i], "--switch-slot") == 0 && i + 1 < argc) slot_mode = argv[++i];
+        else if (strcmp(argv[i], "--set-gbb-short-delay") == 0 && i + 1 < argc) gbb_path = argv[++i];
         else if (strcmp(argv[i], "--disk") == 0 && i + 1 < argc) disk_path = argv[++i];
         else if (strcmp(argv[i], "--reboot") == 0) slot_reboot = true;
     }
 
+    if (gbb_path) {
+        return set_gbb_short_delay(gbb_path);
+    }
     if (slot_mode) {
         return gpt_switch_slot(disk_path, slot_mode, slot_reboot);
     }

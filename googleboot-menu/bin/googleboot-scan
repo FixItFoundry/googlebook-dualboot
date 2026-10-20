@@ -148,6 +148,8 @@ unlock_luks() {
   rm -f "$KEY_FILE"
 
   if [[ $rc -eq 0 ]]; then
+    printf '%s' "$pass" > "$MNT_BASE/luks.pass"
+    chmod 600 "$MNT_BASE/luks.pass"
     udevadm trigger --action=change 2>/dev/null || true
     udevadm settle --timeout=5 2>/dev/null || true
   fi
@@ -190,10 +192,10 @@ scan_entries() {
 
       local os_type
       os_type=$(detect_os_type "$title")
-      local card_title="${title:-FEDOMAKASE LINUX}"
+      local card_title="${title:-Fedora}"
       if [[ $found_linux -eq 0 ]]; then
-        card_title="FEDOMAKASE LINUX"
-        os_type="omarchy"
+        card_title="Fedora"
+        os_type="fedora"
       fi
       echo "${id}|${card_title}|KERNEL ${version} - DIRECT BOOT|${os_type}|${needs_luks}|${ROOT_PART}|/usr/local/bin/googleboot-scan --boot ${id}"
       echo "${id}|${BOOT_MNT}/${linux}|${BOOT_MNT}/${initrd}|${options}" >> "$STATE_FILE"
@@ -213,24 +215,24 @@ scan_entries() {
       local luks_uuid="" cmdline
       luks_uuid=$(get_luks_uuid "$ROOT_PART")
       cmdline="console=tty0 rw rootflags=subvol=root rd.luks.uuid=${luks_uuid} clk_ignore_unused selinux=0"
-      echo "${id}|FEDOMAKASE LINUX|KERNEL ${kver^^} - OMARCHY|omarchy|${needs_luks}|${ROOT_PART}|/usr/local/bin/googleboot-scan --boot ${id}"
+      echo "${id}|Fedora|KERNEL ${kver^^} - OMARCHY|fedora|${needs_luks}|${ROOT_PART}|/usr/local/bin/googleboot-scan --boot ${id}"
       echo "${id}|${vmlinuz}|${initrd}|${cmdline}" >> "$STATE_FILE"
       found_linux=1
     done
   fi
 
   # Guaranteed fallback: whenever /dev/nvme0n1p32 or a LUKS root partition exists on disk,
-  # always emit the primary FEDOMAKASE LINUX card even if /boot is unmounted or empty.
+  # always emit the primary Fedora card even if /boot is unmounted or empty.
   if [[ $found_linux -eq 0 ]]; then
     if [[ -b "$ROOT_PART" ]] || [[ -b /dev/nvme0n1p32 ]] || is_luks_part "$ROOT_PART"; then
-      echo "fedomakase|FEDOMAKASE LINUX|FEDORA 44 - OMARCHY HYPRLAND|omarchy|${needs_luks}|${ROOT_PART}|/usr/local/bin/googleboot-scan --boot fedomakase"
+      echo "fedomakase|Fedora|Fedora 44 • Omarchy Hyprland|fedora|${needs_luks}|${ROOT_PART}|/usr/local/bin/googleboot-scan --boot fedomakase"
       echo "fedomakase|SlotB-Direct|SlotB-Initrd|root=${ROOT_PART}" >> "$STATE_FILE"
       found_linux=1
     fi
   fi
 
-  # 2. Android 17 (Slot A One-Shot Boot)
-  echo "android|ANDROID 17|ALUMINUM OS - SLOT A (ONE-SHOT)|android|0||/usr/local/bin/googleboot-scan --boot android"
+  # 2. Googlebook OS (Android 17 Slot A One-Shot Boot)
+  echo "android|Googlebook OS|Android 17 • Slot A (One-Shot)|android|0||/usr/local/bin/googleboot-scan --boot android"
 
   # 3. Windows 11 Bare-Metal (via U-Boot EFI / EDK2 UEFI Bridge payload)
   if [[ -f "$BOOT_MNT/uefi-bridge.bzImage" ]] || [[ -d "$BOOT_MNT/EFI/Microsoft/Boot" ]]; then
@@ -271,6 +273,24 @@ scan_entries() {
   done
 }
 
+run_sysroot_sync_now() {
+  if [[ -x /usr/local/bin/googlebook-sysroot-sync ]]; then
+    local luks_dev=""
+    for d in /dev/mapper/luks-*; do
+      [[ -b "$d" ]] && { luks_dev="$d"; break; }
+    done
+    if [[ -n "$luks_dev" ]]; then
+      mkdir -p /sysroot 2>/dev/null || true
+      if [[ ! -d /sysroot/etc ]]; then
+        mount -t btrfs -o subvol=root,rw "$luks_dev" /sysroot 2>/dev/null || mount -o rw "$luks_dev" /sysroot 2>/dev/null || true
+      fi
+      if [[ -d /sysroot/etc ]]; then
+        /usr/local/bin/googlebook-sysroot-sync || true
+      fi
+    fi
+  fi
+}
+
 boot_entry() {
   local target_id="$1"
   mount_boot_ro || true
@@ -304,6 +324,7 @@ boot_entry() {
       fi
       umount "$BOOT_MNT" 2>/dev/null || true
       udevadm settle --timeout=5 2>/dev/null || true
+      run_sysroot_sync_now
       exit 0
       ;;
     *)
@@ -322,6 +343,7 @@ boot_entry() {
             echo "[googleboot-scan] Proceeding via direct Slot B switch-root..."
             umount "$BOOT_MNT" 2>/dev/null || true
             udevadm settle --timeout=5 2>/dev/null || true
+            run_sysroot_sync_now
             exit 0
           fi
 

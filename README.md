@@ -20,10 +20,20 @@ The Acer Googlebook 14 (`Moonstone`, board family `Google_Fatcat`) uses:
 ### How A/B Dual-Boot Works
 | Slot | OS | Boot Partitions | Root Filesystem |
 | :--- | :--- | :--- | :--- |
-| **Slot A** | Googlebook OS / Android 17 (Factory OS) | `boot_a` (`p13`), `init_boot_a` (`p18`), `vendor_boot_a` (`p20`), `vbmeta_a` (`p15`) | `super` (`p25`) + `userdata` (`p31`) |
+| **Slot A** | Googlebook OS / Android 17 (Factory OS) | `boot_a` (`p13`), `init_boot_a` (`p18`), `vendor_boot_a` (`p20`), `vbmeta_a` (`p15`) | `super` (`p3`) + `userdata` (`p1`) |
 | **Slot B** | Linux (`googleboot-menu` + Target Distro) | `boot_b` (`p14`, 64 MiB), `init_boot_b` (`p19`, 8 MiB), `vendor_boot_b` (`p21`, 32 MiB), `vbmeta_b` (`p16`) | `p11` (`ext4` `/boot`, 2 GiB) + `p32` (`LUKS2` or plain `Btrfs`/`ext4` root) |
 
 Depthcharge selects the active boot slot by reading the ChromeOS/Depthcharge GPT attribute flags on `vbmeta_a` (`p15`) and `vbmeta_b` (`p16`). All 31 factory Android partitions remain 100% untouched.
+
+> [!WARNING]
+> **Googlebook OS (Android 17) OTA Update Limitation:**
+> Because this dual-boot methodology repurposes **Slot B** (`boot_b`, `init_boot_b`, `vendor_boot_b`, `vbmeta_b`) for Linux while keeping **Slot A** on stock, unrooted Googlebook OS (`user` build, `ro.debuggable=0`):
+> - Whenever Googlebook OS applies an A/B OTA update (`update_engine`), Android writes the new OS into the inactive slot (**Slot B**) and switches the active boot slot to **Slot B**, overwriting `googleboot-menu`.
+> - On an unrooted `user` build, neither `adb shell` (`uid=2000`) nor the built-in Debian Linux VM (`crosvm` virtual disk `/dev/vda`) has raw write access to `/dev/block/nvme0n1*`.
+> - **Therefore, you cannot upgrade Googlebook OS via OTA and return to Linux without either:**
+>   1. **Having a second device handy** (a Mac/Linux PC, or an Android phone over USB-C OTG / TCP Fastboot `tcp:<IP>:5554`) with [`bin/googlebook-restore-slotb`](bin/googlebook-restore-slotb), `adb`/`fastboot`, and a copy of your `slotb-backup/` images (`boot_b.img`, `init_boot_b.img`, `vendor_boot_b.img`, `vbmeta_b.img`), **OR**
+>   2. **Rooting Googlebook OS (`init_boot_a`)**, which defeats the purpose of keeping an unrooted stock OS for seamless OTAs.
+> - **Preventing Accidental Background OTAs While Traveling:** Disable *Automatic system updates* in Googlebook OS (**Settings $\rightarrow$ System $\rightarrow$ Developer options $\rightarrow$ Automatic system updates = OFF**, or via ADB: `adb shell settings put global ota_disable_automatic_update 1`) so Googlebook OS never applies an OTA in the background while you are away from your recovery device.
 
 ---
 
@@ -116,22 +126,23 @@ sudo googlebook-switch-slot b
    ```
 
 ### Restoring Slot B After a Googlebook OS (Android 17) OTA or Development Flash
-When Googlebook OS (on Slot A) applies an A/B OTA update (`update_engine`), it writes the new Android build into **Slot B** (`boot_b`, `init_boot_b`, `vendor_boot_b`, `vbmeta_b`, `dtbo_b`, `pvmfw_b`, and `*_b` inside `super`) and switches the active slot to B. Meanwhile, [`googlebook-pack-slotb`](bin/googlebook-pack-slotb) automatically saves a backup copy of your Linux Slot B images in `/boot/slotb-backup/` on `p11` (unencrypted `ext4`).
+When Googlebook OS (on Slot A) applies an A/B OTA update (`update_engine`), it writes the new Android build into **Slot B** (`boot_b`, `init_boot_b`, `vendor_boot_b`, `vbmeta_b`, `pvmfw_b`, `recovery_b`, `ota_recovery_b`, and `*_b` inside `super` `p3`) and switches the active slot to B. Meanwhile, [`googlebook-pack-slotb`](bin/googlebook-pack-slotb) automatically saves a backup copy of your Linux Slot B images in `/boot/slotb-backup/` on `p11` (unencrypted `ext4`). Copy `/boot/slotb-backup/*.img` to `./slotb-backup/` on your recovery computer or phone so it is ready whenever you install an OTA.
 
-Run **[`googlebook-restore-slotb`](bin/googlebook-restore-slotb)** after any Googlebook OS OTA or `fastboot` flash to:
-1. **Promote the newly updated Googlebook OS from Slot B $\rightarrow$ Slot A** (`boot_b -> boot_a`, `init_boot_b -> init_boot_a`, `vendor_boot_b -> vendor_boot_a`, `vbmeta_b -> vbmeta_a`, `dtbo_b -> dtbo_a`, `pvmfw_b -> pvmfw_a`, and swap `_a` $\leftrightarrow$ `_b` in `super`'s `LpMetadata` header), and
-2. **Restore Linux's `boot_b.img`, `init_boot_b.img`, and `vendor_boot_b.img`** from `/boot/slotb-backup/` on `p11` back into Slot B and re-activate `googleboot-menu`:
+Run **[`googlebook-restore-slotb`](bin/googlebook-restore-slotb)** after any Googlebook OS OTA (once Android has booted into the updated slot and finished merging Virtual A/B snapshots) or `fastboot` flash:
+1. **Unrooted Googlebook OS (via Mac/PC or Android Phone over Fastboot / ADB)**:
+   - When invoked with `--adb` or `--fastboot` while `current-slot=b` (post-OTA), `googlebook-restore-slotb` stages your Linux `slotb-backup/*.img` into **Slot A** (`boot_a`, `init_boot_a`, `vendor_boot_a`, `vbmeta_a`) so the newly updated Android OTA in Slot B is not overwritten.
+   - As soon as Linux boots on the laptop (with full root access to `/dev/nvme0n1`), `googlebook-gpu-init.service` automatically runs `/boot/slotb-backup/googlebook-restore-slotb`, which promotes the new Googlebook OS build from **Slot B $\rightarrow$ Slot A** (including `super` `p3` `LpMetadata` at offset `12288`), restores Linux (`googleboot-menu`) to **Slot B**, and sets **Slot B** active.
+2. **Rooted Googlebook OS (`adb root` / `su`)**:
+   - Directly promotes Slot B $\rightarrow$ Slot A and restores Linux to Slot B from `/dev/block/nvme0n1p11` (`/boot/slotb-backup`), or installs `/data/adb/service.d/99-googlebook-restore-slotb.sh` via `--install-hook` to run automatically on post-OTA boot.
 
 ```bash
-# Option 1: From your dev machine over ADB (after an OTA or Android flash):
+# Option 1 (Recommended for unrooted Googlebook OS): From your Mac/PC over ADB or Fastboot:
 ./bin/googlebook-restore-slotb --adb --reboot
-
-# Option 2: Directly on the Googlebook inside an Android 17 root shell (adb root / su):
-mount -t ext4 -o ro /dev/block/nvme0n1p11 /data/local/tmp/mnt && \
-  sh /data/local/tmp/mnt/slotb-backup/googlebook-restore-slotb --reboot
-
-# Option 3: From Fastboot using a local backup folder (--no-promote if you flashed Slot A directly):
+# Or directly from Fastboot (USB-C cable or TCP fastboot tcp:<IP>:5554):
 ./bin/googlebook-restore-slotb --fastboot ./slotb-backup --reboot
+
+# Option 2: On a rooted Googlebook OS (adb root / su), or to install the automatic root boot hook:
+./bin/googlebook-restore-slotb --adb --install-hook --reboot
 ```
 
 ---

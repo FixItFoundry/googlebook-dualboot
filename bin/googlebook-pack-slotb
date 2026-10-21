@@ -107,6 +107,30 @@ UCMEOF
     sed -i 's/Regex "(rt721(-sdca)?)"/Regex "^(rt721(-sdca)?)$"/' /usr/share/alsa/ucm2/sof-soundwire/rt721.conf 2>/dev/null || true
   fi
 fi
+# Fedora omits the Chrome EC ISHTP bridge; keep the upstream driver buildable.
+SENSOR_MODS_DIR="$SELF_DIR/sensor-mods"
+[[ -d "$SENSOR_MODS_DIR" ]] || SENSOR_MODS_DIR="/usr/local/share/googlebook-sensors"
+[[ -d "$SENSOR_MODS_DIR" ]] || SENSOR_MODS_DIR="/usr/share/omarchy/install/hardware/sensor-mods"
+if [[ -d "$SENSOR_MODS_DIR" ]]; then
+  if ! modinfo -k "$KVER" cros_ec_ishtp >/dev/null 2>&1; then
+    SENSOR_BUILD=$(mktemp -d)
+    cp "$SENSOR_MODS_DIR"/{Makefile,cros_ec.h,cros_ec_ishtp.c} "$SENSOR_BUILD/"
+    if ! make -C "/lib/modules/$KVER/build" M="$SENSOR_BUILD" modules; then
+      rm -rf "$SENSOR_BUILD"
+      log "cannot build cros_ec_ishtp for $KVER; boot partitions unchanged"
+      exit 1
+    fi
+    install -D -m644 "$SENSOR_BUILD/cros_ec_ishtp.ko" "/lib/modules/$KVER/extra/cros_ec_ishtp.ko"
+    rm -rf "$SENSOR_BUILD"
+  fi
+  install -D -m644 "$SENSOR_MODS_DIR/firmware/intel/ish/ish_ptl_62b0f067_501de2f8.bin" \
+    /lib/firmware/intel/ish/ish_ptl_62b0f067_501de2f8.bin
+  mkdir -p /etc/dracut.conf.d
+  cat > /etc/dracut.conf.d/91-googlebook-sensors.conf <<'SENSOREOF'
+add_drivers+=" intel_ish_ipc cros_ec_ishtp cros_ec_sensors cros_ec_lid_angle cros_ec_keyb "
+install_items+=" /lib/firmware/intel/ish/ish_ptl_62b0f067_501de2f8.bin "
+SENSOREOF
+fi
 depmod -a "$KVER" 2>/dev/null || true
 
 mkdir -p /etc/modules-load.d /etc/modprobe.d /etc/dracut.conf.d
@@ -156,7 +180,12 @@ log "initramfs size: $SZ bytes"
 # Also inject googleboot-menu so Slot B always boots into the graphical OS selector!
 mkdir -p "$W/unpacked" "$W/split_init/usr/lib"
 (cd "$W/unpacked" && ( /usr/lib/dracut/skipcpio "$W/initramfs.img" 2>/dev/null || cat "$W/initramfs.img" ) | zstd -d | cpio -idm --quiet)
-rm -rf "$W/unpacked/usr/lib/firmware"/{xe,i915,amdgpu,radeon,nvidia,cxgb4,LENOVO,dell,HP,iwlwifi*,intel/ibt*,intel/vpu*,intel/sof*,intel/ish*,intel/qat*,qat*,cavium,qcom,mediatek,ath*,brcm} 2>/dev/null || true
+rm -rf "$W/unpacked/usr/lib/firmware"/{xe,i915,amdgpu,radeon,nvidia,cxgb4,LENOVO,dell,HP,iwlwifi*,intel/ibt*,intel/vpu*,intel/sof*,intel/qat*,qat*,cavium,qcom,mediatek,ath*,brcm} 2>/dev/null || true
+if [[ -d "$SENSOR_MODS_DIR" ]]; then
+  mkdir -p "$W/unpacked/usr/local/share/googlebook-sensors"
+  cp "$SENSOR_MODS_DIR"/{Makefile,cros_ec.h,cros_ec_ishtp.c} "$W/unpacked/usr/local/share/googlebook-sensors/"
+  cp -a "$SENSOR_MODS_DIR/firmware" "$W/unpacked/usr/local/share/googlebook-sensors/"
+fi
 mv "$W/unpacked/usr/lib/modules" "$W/split_init/usr/lib/modules"
 
 for menu_installer in \

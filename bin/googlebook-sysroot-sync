@@ -19,6 +19,14 @@ if [ -d "/sysroot/lib/modules/$KVER" ]; then
   chroot /sysroot depmod -a "$KVER" 2>/dev/null || true
 fi
 
+# Keep the board firmware and bridge source available after switching root.
+if [ -d /usr/local/share/googlebook-sensors ]; then
+  mkdir -p /sysroot/usr/local/share/googlebook-sensors /sysroot/lib/firmware/intel/ish
+  cp -a /usr/local/share/googlebook-sensors/. /sysroot/usr/local/share/googlebook-sensors/ || exit 1
+  cp /usr/local/share/googlebook-sensors/firmware/intel/ish/ish_ptl_62b0f067_501de2f8.bin \
+    /sysroot/lib/firmware/intel/ish/ || exit 1
+fi
+
 if [ -d /usr/local/share/googlebook-audio/firmware ]; then
   mkdir -p /sysroot/lib/firmware/realtek/rt1320
   cp -f /usr/local/share/googlebook-audio/firmware/*.dat /sysroot/lib/firmware/realtek/rt1320/ 2>/dev/null || true

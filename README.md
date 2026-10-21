@@ -141,7 +141,11 @@ Run **[`googlebook-restore-slotb`](bin/googlebook-restore-slotb)** after any Goo
 # Or directly from Fastboot (USB-C cable or TCP fastboot tcp:<IP>:5554):
 ./bin/googlebook-restore-slotb --fastboot ./slotb-backup --reboot
 
-# Option 2: On a rooted Googlebook OS (adb root / su), or to install the automatic root boot hook:
+# Option 2: From an Android phone (USB-C OTG cable or TCP Fastboot):
+# Install ./android-restore-app/bin/googlebook-slotb-restore.apk on your phone
+# (see ./android-restore-app/README.md) and tap "Set Active Slot = B" or "Flash & Restore Linux Slot B".
+
+# Option 3: On a rooted Googlebook OS (adb root / su), or to install the automatic root boot hook:
 ./bin/googlebook-restore-slotb --adb --install-hook --reboot
 ```
 

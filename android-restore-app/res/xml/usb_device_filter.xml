@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Google Fastboot USB Interface (Class 0xFF, Subclass 0x42, Protocol 0x03) -->
+    <usb-device class="255" subclass="66" protocol="3" />
+    <!-- Google Vendor ID 0x18d1 (6353) -->
+    <usb-device vendor-id="6353" />
+</resources>

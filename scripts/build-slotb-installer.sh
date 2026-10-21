@@ -53,6 +53,40 @@ echo "[3/4] Pruning unused GPU/NIC firmware and splitting into rd_vendor.img + r
 rm -rf "$WORK/unpacked/usr/lib/firmware"/{amdgpu,i915,xe,nvidia,radeon,qed,cxgb4,netronome,mellanox,cypress,mrvl,ath10k,ath11k,ath12k,brcm, mediatek,ti-connectivity} 2>/dev/null || true
 rm -rf "$WORK/unpacked/usr/lib/modules/$KVER/kernel/drivers/gpu/drm"/{amd,i915,xe,nouveau,radeon} 2>/dev/null || true
 
+# Include the board firmware and the exact target kernel's sensor dependencies.
+SENSOR_MODS_DIR="$(cd "$(dirname "$0")/.." && pwd)/sensor-mods"
+if [[ -d "$SENSOR_MODS_DIR" ]]; then
+  mkdir -p "$WORK/unpacked/usr/local/share/googlebook-sensors" "$WORK/unpacked/usr/lib/firmware/intel/ish"
+  cp "$SENSOR_MODS_DIR"/{Makefile,cros_ec.h,cros_ec_ishtp.c} "$WORK/unpacked/usr/local/share/googlebook-sensors/"
+  cp -a "$SENSOR_MODS_DIR/firmware" "$WORK/unpacked/usr/local/share/googlebook-sensors/"
+  cp "$SENSOR_MODS_DIR/firmware/intel/ish/ish_ptl_62b0f067_501de2f8.bin" "$WORK/unpacked/usr/lib/firmware/intel/ish/"
+  for module in intel_ish_ipc cros_ec_ishtp cros_ec_sensors cros_ec_lid_angle cros_ec_keyb; do
+    if dependencies=$(modprobe --show-depends --set-version "$KVER" "$module" 2>/dev/null); then
+      while read -r kind path rest; do
+        [[ $kind == insmod ]] || continue
+        relative=${path#*/modules/$KVER/}
+        [[ $relative != "$path" ]] || { echo "Unexpected module path: $path" >&2; exit 1; }
+        install -D -m644 "$path" "$WORK/unpacked/usr/lib/modules/$KVER/$relative"
+      done <<<"$dependencies"
+    fi
+  done
+  if [[ -f "$SENSOR_MODS_DIR/prebuilt/$KVER/cros_ec_ishtp.ko" ]]; then
+    [[ $(modinfo -F vermagic "$SENSOR_MODS_DIR/prebuilt/$KVER/cros_ec_ishtp.ko") == "$KVER "* ]] || {
+      echo "cros_ec_ishtp prebuilt does not match $KVER" >&2
+      exit 1
+    }
+    install -D -m644 "$SENSOR_MODS_DIR/prebuilt/$KVER/cros_ec_ishtp.ko" \
+      "$WORK/unpacked/usr/lib/modules/$KVER/extra/cros_ec_ishtp.ko"
+  fi
+  depmod -b "$WORK/unpacked" -a "$KVER"
+  for module in intel_ish_ipc cros_ec_ishtp cros_ec_sensors cros_ec_lid_angle cros_ec_keyb; do
+    modprobe -d "$WORK/unpacked" --set-version "$KVER" --show-depends "$module" >/dev/null || {
+      echo "Missing $module or its dependencies for installer kernel $KVER; build on a host with that kernel's modules installed." >&2
+      exit 1
+    }
+  done
+fi
+
 mv "$WORK/unpacked/usr/lib/modules" "$WORK/split_init/usr/lib/modules"
 
 (cd "$WORK/unpacked" && find . -print0 | cpio --null -o -H newc --quiet | zstd -19 -T0 > "$OUT_DIR/rd_vendor.img")
@@ -62,6 +96,11 @@ VSZ=$(stat -f %z "$OUT_DIR/rd_vendor.img" 2>/dev/null || stat -c %s "$OUT_DIR/rd
 ISZ=$(stat -f %z "$OUT_DIR/rd_init.img" 2>/dev/null || stat -c %s "$OUT_DIR/rd_init.img")
 echo "      rd_vendor.img: $VSZ bytes (limit 33488896)"
 echo "      rd_init.img  : $ISZ bytes (limit 8380416)"
+
+(( VSZ <= 33488896 && ISZ <= 8380416 )) || {
+  echo "Sensor-equipped installer ramdisks exceed Slot B capacity; no boot images written." >&2
+  exit 1
+}
 
 echo "[4/4] Packing boot_b.img, init_boot_b.img, and vendor_boot_b.img..."
 printf 'androidboot.fedomakase=1\n' > "$WORK/bootconfig"

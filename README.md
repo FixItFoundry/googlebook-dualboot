@@ -21,7 +21,7 @@ The Acer Googlebook 14 (`Moonstone`, board family `Google_Fatcat`) uses:
 ### How A/B Dual-Boot Works
 | Slot | OS | Boot Partitions | Root Filesystem |
 | :--- | :--- | :--- | :--- |
-| **Slot A** | Googlebook OS / Android 17 (Factory OS) | `boot_a` (`p13`), `init_boot_a` (`p18`), `vendor_boot_a` (`p20`), `vbmeta_a` (`p15`) | `super` (`p3`) + factory partition labeled `userdata` |
+| **Slot A** | Googlebook OS | `boot_a` (`p13`), `init_boot_a` (`p18`), `vendor_boot_a` (`p20`), `vbmeta_a` (`p15`) | `super` (`p3`) + factory partition labeled `userdata` |
 | **Slot B** | Linux (`googleboot-menu` + Target Distro) | `boot_b` (`p14`, 64 MiB), `init_boot_b` (`p19`, 8 MiB), `vendor_boot_b` (`p21`, 32 MiB), `vbmeta_b` (`p16`) | `p11` (`ext4` `/boot`, 2 GiB) + `p32` (`LUKS2` or plain `Btrfs`/`ext4` root) |
 
 Depthcharge selects the active boot slot by reading the ChromeOS/Depthcharge GPT attribute flags on `vbmeta_a` (`p15`) and `vbmeta_b` (`p16`). The Linux setup repurposes the Slot B boot partitions and the verified Linux `/boot` slot. It does not preserve the factory layout byte-for-byte. Confirm partition labels and sector ranges on your own disk before partitioning; do not infer the location of `userdata` from an example partition number.

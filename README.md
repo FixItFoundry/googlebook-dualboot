@@ -1,6 +1,7 @@
 # Googlebook 14 (`Moonstone`) Dual-Boot Toolkit
+<img width="1448" height="1086" alt="image" src="https://github.com/user-attachments/assets/fbbfb277-41df-4ff7-8bef-c04d6fe34f5b" />
 
-Linux dual-boot tools, a graphical `kexec` boot menu, and Coreboot/Panther Lake hardware modules for the **Acer Googlebook 14 (`GP714-91N`, `Moonstone` / `Google_Fatcat`)**. The working configuration is Googlebook OS / Android 17 on Slot A and Linux on Slot B. Other distributions require their own validation; Windows boot is experimental and is not supported by the supplied bridge builder.
+Linux dual-boot tools, a graphical `kexec` boot menu, and Coreboot/Panther Lake hardware modules for the **Acer Googlebook 14**. The working configuration is Googlebook OS on Slot A and Linux on Slot B. Other distributions require their own validation; Windows boot is experimental and is not supported by the supplied bridge builder.
 
 > [!IMPORTANT]
 > **Hardware Validation Notice:** This repository and its partition layout, Depthcharge A/B slot tooling, and Coreboot/Panther Lake kernel modules have **only been validated on the Acer Googlebook 14 (`GP714-91N`, board `Moonstone` / `Google_Fatcat`)**. Other Googlebook / Aluminum OS boards may use different partition numbering, display panels, or EC/audio topologies and are not yet validated.

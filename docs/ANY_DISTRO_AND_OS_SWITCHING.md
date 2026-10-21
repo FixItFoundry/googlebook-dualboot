@@ -116,3 +116,16 @@ Depending on whether you have root/ADB enabled in Android or are using hardware 
      ```
 3. **Via Slot B Boot Menu (Zero Commands Needed in Android)**:
    - Keep **Slot B** as your default slot (`Successful=1, Priority=14`) and include a 3-second boot menu in Slot B (`1. Linux [default]`, `2. Android 17`). When you boot Android via one-shot (`Tries=1, Successful=0`), simply clicking **Restart** inside Android drops you right back into the Slot B menu!
+
+---
+
+## Part 3: Googlebook OS (Android 17) OTA Update Caveat & Recovery
+
+> [!WARNING]
+> **OTA Update Requirement:** Because Googlebook OS on Slot A uses A/B OTA updates (`update_engine`), applying an OTA writes the new Android OS into **Slot B** (`boot_b`, `init_boot_b`, `vendor_boot_b`, `vbmeta_b`) and sets Slot B active. On an unrooted `user` build (`ro.debuggable=0`), neither `adb shell` nor the built-in Debian VM (`crosvm`) has write access to `/dev/block/nvme0n1*`.
+>
+> Consequently, **upgrading Googlebook OS via OTA requires either**:
+> 1. **An external device handy** (a Mac/Linux PC, or an Android phone via USB-C OTG / TCP Fastboot `tcp:<IP>:5554`) with [`bin/googlebook-restore-slotb`](../bin/googlebook-restore-slotb), `adb`/`fastboot`, and your `slotb-backup/*.img` files to re-stage Linux after the OTA finishes merging, **OR**
+> 2. **Rooting Googlebook OS (`init_boot_a`)**, which defeats keeping a stock unrooted Slot A for OTA updates.
+>
+> **Disable Automatic Background OTAs:** Run `adb shell settings put global ota_disable_automatic_update 1` (or disable **Settings $\rightarrow$ System $\rightarrow$ Developer options $\rightarrow$ Automatic system updates**) so Googlebook OS never auto-installs an OTA while you are away from your recovery device.

@@ -140,12 +140,16 @@ XEEOF
 
 # 5. Install Googlebook Slot A/B switch utility, googleboot-menu binary, udev rules, and sudoers
 mkdir -p /sysroot/usr/local/bin /sysroot/usr/local/sbin /sysroot/etc/udev/rules.d /sysroot/etc/sudoers.d
-for bin_name in googlebook-switch-slot googleboot-menu googleboot-scan; do
+for bin_name in googlebook-switch-slot googleboot-menu googleboot-scan googlebook-restore-slotb; do
   if [ -f "/usr/local/bin/$bin_name" ]; then
     cp -f "/usr/local/bin/$bin_name" "/sysroot/usr/local/bin/$bin_name"
     chmod 755 "/sysroot/usr/local/bin/$bin_name"
   fi
 done
+if [ -f /sysroot/boot/slotb-backup/googlebook-restore-slotb ] && [ ! -f /sysroot/usr/local/bin/googlebook-restore-slotb ]; then
+  cp -f /sysroot/boot/slotb-backup/googlebook-restore-slotb /sysroot/usr/local/bin/googlebook-restore-slotb
+  chmod 755 /sysroot/usr/local/bin/googlebook-restore-slotb
+fi
 ln -sf /usr/local/bin/googlebook-switch-slot /sysroot/usr/local/bin/boot-android
 
 cat > /sysroot/etc/udev/rules.d/99-googlebook-slotb.rules << 'UDEVEOF'
@@ -515,6 +519,13 @@ done
 
 if [ ! -e /dev/dri/renderD128 ]; then
   modprobe xe gsc_firmware_path="" huc_firmware_path="" wedged_mode=0 enable_psr=0 2>/dev/null || true
+fi
+
+# Auto-complete post-OTA Slot B -> Slot A promotion if Linux was staged via Slot A
+if [ -x /boot/slotb-backup/googlebook-restore-slotb ] && [ -b /dev/nvme0n1p21 ]; then
+  if ! dd if=/dev/nvme0n1p21 bs=4096 count=16 2>/dev/null | grep -q -E "androidboot\.(googleboot|fedomakase)=1"; then
+    /boot/slotb-backup/googlebook-restore-slotb || true
+  fi
 fi
 exit 0
 GPUEOF

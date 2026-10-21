@@ -25,13 +25,16 @@ if [[ -z "$ISO_DIR" || ! -f "$ISO_DIR/images/pxeboot/vmlinuz" || ! -f "$ISO_DIR/
   exit 1
 fi
 
-MKBOOTIMG=$(command -v mkbootimg || echo "/opt/homebrew/bin/mkbootimg")
+SCRIPT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+MKBOOTIMG="$SCRIPT_ROOT/bin/mkbootimg"
 if [[ ! -x "$MKBOOTIMG" ]]; then
   echo "Error: mkbootimg not found. Install android-tools." >&2
   exit 1
 fi
 
 mkdir -p "$OUT_DIR"
+ISO_DIR=$(cd "$ISO_DIR" && pwd)
+OUT_DIR=$(cd "$OUT_DIR" && pwd)
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
@@ -50,7 +53,7 @@ if [[ -n "$MODS_DIR" && -d "$MODS_DIR" ]]; then
 fi
 
 echo "[3/4] Pruning unused GPU/NIC firmware and splitting into rd_vendor.img + rd_init.img..."
-rm -rf "$WORK/unpacked/usr/lib/firmware"/{amdgpu,i915,xe,nvidia,radeon,qed,cxgb4,netronome,mellanox,cypress,mrvl,ath10k,ath11k,ath12k,brcm, mediatek,ti-connectivity} 2>/dev/null || true
+rm -rf "$WORK/unpacked/usr/lib/firmware"/{amdgpu,i915,xe,nvidia,radeon,qed,cxgb4,netronome,mellanox,cypress,mrvl,ath10k,ath11k,ath12k,brcm,mediatek,ti-connectivity} 2>/dev/null || true
 rm -rf "$WORK/unpacked/usr/lib/modules/$KVER/kernel/drivers/gpu/drm"/{amd,i915,xe,nouveau,radeon} 2>/dev/null || true
 
 # Include the board firmware and the exact target kernel's sensor dependencies.
@@ -92,8 +95,8 @@ mv "$WORK/unpacked/usr/lib/modules" "$WORK/split_init/usr/lib/modules"
 (cd "$WORK/unpacked" && find . -print0 | cpio --null -o -H newc --quiet | zstd -19 -T0 > "$OUT_DIR/rd_vendor.img")
 (cd "$WORK/split_init" && find . -print0 | cpio --null -o -H newc --quiet | zstd -19 -T0 > "$OUT_DIR/rd_init.img")
 
-VSZ=$(stat -f %z "$OUT_DIR/rd_vendor.img" 2>/dev/null || stat -c %s "$OUT_DIR/rd_vendor.img")
-ISZ=$(stat -f %z "$OUT_DIR/rd_init.img" 2>/dev/null || stat -c %s "$OUT_DIR/rd_init.img")
+VSZ=$(wc -c < "$OUT_DIR/rd_vendor.img")
+ISZ=$(wc -c < "$OUT_DIR/rd_init.img")
 echo "      rd_vendor.img: $VSZ bytes (limit 33488896)"
 echo "      rd_init.img  : $ISZ bytes (limit 8380416)"
 

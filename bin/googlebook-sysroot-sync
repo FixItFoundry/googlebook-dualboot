@@ -82,14 +82,8 @@ if [ -f /sysroot/boot/slotb-backup/googlebook-restore-slotb ] && [ ! -f /sysroot
 fi
 ln -sf /usr/local/bin/googlebook-switch-slot /sysroot/usr/local/bin/boot-android
 
-cat > /sysroot/etc/udev/rules.d/99-googlebook-slotb.rules << 'UDEVEOF'
-KERNEL=="nvme0n1", SUBSYSTEM=="block", MODE="0660", GROUP="wheel"
-UDEVEOF
-
-cat > /sysroot/etc/sudoers.d/googlebook-slotb << 'SUDOEOF'
-%wheel ALL=(root) NOPASSWD: /usr/local/bin/googlebook-switch-slot, /usr/local/bin/boot-android, /usr/local/bin/googleboot-menu
-SUDOEOF
-chmod 0440 /sysroot/etc/sudoers.d/googlebook-slotb
+# Remove legacy grants; slot switching uses the administrator's normal sudo policy.
+rm -f /sysroot/etc/udev/rules.d/99-googlebook-slotb.rules /sysroot/etc/sudoers.d/googlebook-slotb
 
 # 3. Install Moonstone Vivaldi top-row keyboard hwdb and keyd mappings
 mkdir -p /sysroot/etc/keyd /sysroot/etc/udev/hwdb.d
@@ -153,12 +147,6 @@ if [ ! -e /dev/dri/renderD128 ]; then
   modprobe xe gsc_firmware_path="" huc_firmware_path="" wedged_mode=0 enable_psr=0 2>/dev/null || true
 fi
 
-# Auto-complete post-OTA Slot B -> Slot A promotion if Linux was staged via Slot A
-if [ -x /boot/slotb-backup/googlebook-restore-slotb ] && [ -b /dev/nvme0n1p21 ]; then
-  if ! dd if=/dev/nvme0n1p21 bs=4096 count=16 2>/dev/null | grep -q -E "androidboot\.(googleboot|fedomakase)=1"; then
-    /boot/slotb-backup/googlebook-restore-slotb || true
-  fi
-fi
 exit 0
 GPUEOF
 chmod 755 /sysroot/usr/local/sbin/googlebook-gpu-init

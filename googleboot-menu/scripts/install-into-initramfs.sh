@@ -11,7 +11,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 RD_DIR="${1:?Usage: $0 /path/to/unpacked_rd_vendor}"
 
-[[ -x "$SCRIPT_DIR/bin/googleboot-menu" ]] || make -C "$SCRIPT_DIR"
+make -B -C "$SCRIPT_DIR"
 
 mkdir -p "$RD_DIR/usr/local/bin" \
          "$RD_DIR/boot/googlebook-theme/icons" \
@@ -20,10 +20,10 @@ mkdir -p "$RD_DIR/usr/local/bin" \
 
 cp -f "$SCRIPT_DIR/bin/googleboot-menu" "$RD_DIR/usr/local/bin/googleboot-menu"
 cp -f "$SCRIPT_DIR/bin/googleboot-scan" "$RD_DIR/usr/local/bin/googleboot-scan"
-if [[ -f "$SCRIPT_DIR/../bin/googlebook-switch-slot" ]]; then
-  cp -f "$SCRIPT_DIR/../bin/googlebook-switch-slot" "$RD_DIR/usr/local/bin/googlebook-switch-slot"
-  chmod 755 "$RD_DIR/usr/local/bin/googlebook-switch-slot"
-fi
+for name in googlebook-switch-slot googlebook-restore-slotb; do
+  cp -f "$SCRIPT_DIR/../bin/$name" "$RD_DIR/usr/local/bin/$name"
+  chmod 755 "$RD_DIR/usr/local/bin/$name"
+done
 cp -f "$SCRIPT_DIR/theme/theme.conf" "$RD_DIR/boot/googlebook-theme/theme.conf"
 chmod 755 "$RD_DIR/usr/local/bin/googleboot-menu" \
           "$RD_DIR/usr/local/bin/googleboot-scan"
@@ -36,6 +36,9 @@ elif command -v kexec >/dev/null 2>&1; then
   cp -f "$(command -v kexec)" "$RD_DIR/usr/sbin/kexec"
   chmod 755 "$RD_DIR/usr/sbin/kexec"
 fi
+
+# Do not carry the old whole-disk write grant into the rebuilt initramfs.
+rm -f "$RD_DIR/etc/udev/rules.d/99-googlebook-slotb.rules" "$RD_DIR/etc/sudoers.d/googlebook-slotb"
 
 # Prevent plymouth from grabbing DRM master (/dev/dri/card0) before googleboot-menu
 rm -f "$RD_DIR/usr/lib/systemd/system/sysinit.target.wants/plymouth-start.service" \

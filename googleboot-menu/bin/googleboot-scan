@@ -235,7 +235,7 @@ scan_entries() {
   echo "android|Googlebook OS|Android 17 • Slot A (One-Shot)|android|0||/usr/local/bin/googleboot-scan --boot android"
 
   # 3. Windows 11 Bare-Metal (via U-Boot EFI / EDK2 UEFI Bridge payload)
-  if [[ -f "$BOOT_MNT/uefi-bridge.bzImage" ]] || [[ -d "$BOOT_MNT/EFI/Microsoft/Boot" ]]; then
+  if [[ -f "$BOOT_MNT/uefi-bridge.bzImage" ]]; then
     echo "windows|WINDOWS 11|UEFI BRIDGE -> BOOTMGFW.EFI|windows|0||/usr/local/bin/googleboot-scan --boot windows"
   fi
 
@@ -313,7 +313,7 @@ boot_entry() {
         kexec -l "$BOOT_MNT/uefi-bridge.bzImage" --command-line="console=tty0"
         kexec -e
       else
-        echo "Error: $BOOT_MNT/uefi-bridge.bzImage not found. Run build-uefi-bridge.sh first." >&2
+        echo "Error: $BOOT_MNT/uefi-bridge.bzImage not found. Windows boot is experimental; the bridge builder only produces an ELF research artifact." >&2
         exit 1
       fi
       ;;

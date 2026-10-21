@@ -1,0 +1,3 @@
+usb:sda|USB|Live USB|usb|0||usb-command
+windows|Windows|Experimental|windows|0||windows-command
+linux|Linux|Installed|fedora|1|/dev/nvme0n1p32|linux-command

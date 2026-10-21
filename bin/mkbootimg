@@ -28,7 +28,6 @@ import os
 import re
 import tempfile
 
-from gki.generate_gki_certificate import generate_gki_certificate
 
 # Constant and structure definition is in
 # system/tools/mkbootimg/include/bootimg/bootimg.h
@@ -587,6 +586,8 @@ def add_boot_image_signature(args, pagesize):
     vbmeta partition) via the Android Verified Boot process, when the
     device boots.
     """
+    from gki.generate_gki_certificate import generate_gki_certificate
+
     # Flush the buffer for signature calculation.
     args.output.flush()
 

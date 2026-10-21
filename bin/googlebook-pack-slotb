@@ -45,10 +45,11 @@ fi
 log "kernel $KVER  disk $DISK"
 log "targets: $BOOT_B $INIT_B $VEND_B"
 
-SELF_DIR="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd || true)"
+SELF_DIR="$(dirname "$(dirname "$(readlink -f "$0")")")"
 export PATH="$SELF_DIR/bin:/usr/local/bin:$PATH"
 command -v mkbootimg >/dev/null || dnf install -y android-tools >/dev/null 2>&1 || true
 command -v mkbootimg >/dev/null || { log "mkbootimg unavailable"; exit 1; }
+mkbootimg --help >/dev/null || { log "mkbootimg cannot run"; exit 1; }
 
 # --- ensure coreboot_table.ko & framebuffer-coreboot.ko are installed for $KVER ---
 mkdir -p "/lib/modules/$KVER/extra"
@@ -267,10 +268,10 @@ for pair in "boot_b.img:$BOOT_B" "init_boot_b.img:$INIT_B" "vendor_boot_b.img:$V
 done
 
 # Save backup copy of Slot B images & restore wrapper onto /boot (p11, unencrypted ext4)
-# so Googlebook OS (Android 17) OTAs can be promoted to Slot A and Linux Slot B restored in 1s.
+# for restoring an existing Linux Slot B; Android OTA promotion is unsupported.
 if [[ -d /boot ]]; then
   mkdir -p /boot/slotb-backup
-  cp -f "$W/boot_b.img" "$W/init_boot_b.img" "$W/vendor_boot_b.img" /boot/slotb-backup/ 2>/dev/null || true
+  cp -f "$W/boot_b.img" "$W/init_boot_b.img" "$W/vendor_boot_b.img" /boot/slotb-backup/
   for rscript in "$SELF_DIR/bin/googlebook-restore-slotb" "/usr/local/bin/googlebook-restore-slotb" "/usr/share/omarchy/bin/googlebook-restore-slotb"; do
     if [[ -f "$rscript" ]]; then
       cp -f "$rscript" /boot/slotb-backup/googlebook-restore-slotb

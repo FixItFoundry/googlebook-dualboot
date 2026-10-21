@@ -25,6 +25,8 @@ if [[ -z "$SRC" || -z "$DST" || ! -b "$SRC" || ! -b "$DST" ]]; then
   exit 1
 fi
 
+SRC=$(readlink -f "$SRC")
+DST=$(readlink -f "$DST")
 if [[ "$SRC" == "$DST" ]]; then
   echo "Error: source and target disks must be different!" >&2
   exit 1
@@ -43,8 +45,8 @@ if (( DST_BYTES < SRC_BYTES )); then
 fi
 
 if [[ "$SKIP_DD" != "--skip-dd" ]]; then
-  echo "[1/3] Cloning $SRC -> $DST (conv=sparse,fsync bs=16M)..."
-  dd if="$SRC" of="$DST" bs=16M conv=sparse,fsync status=progress
+  echo "[1/3] Cloning $SRC -> $DST (conv=fsync bs=16M)..."
+  dd if="$SRC" of="$DST" bs=16M conv=fsync status=progress
   sync
 else
   echo "[1/3] Skipping block copy (--skip-dd specified)."

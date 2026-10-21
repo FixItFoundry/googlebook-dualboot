@@ -3,3 +3,5 @@
 *.iso
 slotb-backup/
 googleboot-menu/bin/googleboot-menu
+
+__pycache__/

@@ -5,7 +5,7 @@
 
 set -eu
 
-APP_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+APP_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 SDK_CACHE="${ANDROID_HOME:-/tmp/android-sdk-cache}"
 BUILD_TOOLS_JAR_DIR="$SDK_CACHE/android-11"
 BUILD_TOOLS_BIN_DIR="$SDK_CACHE/android-15"
@@ -80,6 +80,7 @@ java -jar "$ECJ_JAR" -1.8 -nowarn \
   -classpath "$PLATFORM_JAR" \
   -d "$WORK_DIR/classes" \
   "$WORK_DIR/src_gen/com/fixitfoundry/googlebookrestore/R.java" \
+  "$APP_DIR/src/com/fixitfoundry/googlebookrestore/BootImages.java" \
   "$APP_DIR/src/com/fixitfoundry/googlebookrestore/MainActivity.java"
 
 echo "[build-apk] Converting bytecode to DEX with d8..."

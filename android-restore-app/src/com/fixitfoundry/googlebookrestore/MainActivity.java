@@ -26,7 +26,10 @@ import android.hardware.usb.UsbInterface;
 import android.hardware.usb.UsbManager;
 import android.os.Build;
 import android.os.Bundle;
-import android.os.Environment;
+import android.net.Uri;
+import android.database.Cursor;
+import android.provider.DocumentsContract;
+import android.content.ContentResolver;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
@@ -68,7 +71,8 @@ public class MainActivity extends Activity {
     private TextView tabUsb;
     private TextView tabTcp;
     private EditText etTcpHost;
-    private CheckBox cbPromoteOta;
+    private Uri backupTree;
+    private Button btnChooseBackup;
     private CheckBox cbAutoReboot;
     private TextView tvLog;
     private ScrollView scrollLog;
@@ -112,11 +116,26 @@ public class MainActivity extends Activity {
 
         buildUi();
         appendLog("Googlebook 14 (Moonstone) Ready.");
-        appendLog("Image lookup order:");
-        appendLog("  1. /sdcard/Download/slotb-backup/");
-        File extDir = new File(getExternalFilesDir(null), "slotb-backup");
-        appendLog("  2. " + extDir.getAbsolutePath());
-        appendLog("  3. Bundled APK assets/slotb-backup/\n");
+        String savedTree = getPreferences(MODE_PRIVATE).getString("backupTree", null);
+        if (savedTree != null) backupTree = Uri.parse(savedTree);
+        appendLog("Choose a backup folder, or use bundled images. Only verified Linux Slot B can be restored.");
+        appendLog("Android OTA recovery is unsupported. Fastboot fetch support is required.");
+    }
+
+    @Override
+    protected void onActivityResult(int request, int result, Intent data) {
+        super.onActivityResult(request, result, data);
+        if (request == 1 && result == RESULT_OK && data != null && data.getData() != null) {
+            try {
+                Uri tree = data.getData();
+                getContentResolver().takePersistableUriPermission(tree, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                backupTree = tree;
+                getPreferences(MODE_PRIVATE).edit().putString("backupTree", tree.toString()).apply();
+                appendLog("Backup folder selected. Tap Restore when ready.");
+            } catch (SecurityException e) {
+                appendLog("[ERROR] Cannot retain folder access: " + e.getMessage());
+            }
+        }
     }
 
     @Override
@@ -234,7 +253,7 @@ public class MainActivity extends Activity {
         root.addView(heroTitle, heroLp);
 
         TextView heroSub = new TextView(this);
-        heroSub.setText("Restore Slot B Linux & googleboot-menu after Googlebook OS updates.");
+        heroSub.setText("Restore an existing Linux Slot B. Android OTA recovery is unsupported.");
         heroSub.setTextColor(Color.parseColor("#9AA0A6"));
         heroSub.setTextSize(13);
         heroSub.setTypeface(googleSansRegular);
@@ -309,13 +328,16 @@ public class MainActivity extends Activity {
         cardLp.topMargin = dp(14);
         card.setLayoutParams(cardLp);
 
-        cbPromoteOta = new CheckBox(this);
-        cbPromoteOta.setText("Post-OTA Safe Mode (stage via Slot A when current-slot=b)");
-        cbPromoteOta.setTextColor(Color.parseColor("#E8EAED"));
-        cbPromoteOta.setTextSize(12.5f);
-        cbPromoteOta.setTypeface(googleSansRegular);
-        cbPromoteOta.setChecked(true);
-        card.addView(cbPromoteOta);
+        btnChooseBackup = makePillButton("Choose backup folder", "#181A1F", "#FFFFFF", "#30333B", googleSans);
+        btnChooseBackup.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+                startActivityForResult(intent, 1);
+            }
+        });
+        card.addView(btnChooseBackup);
 
         cbAutoReboot = new CheckBox(this);
         cbAutoReboot.setText("Reboot Googlebook automatically when complete");
@@ -549,6 +571,7 @@ public class MainActivity extends Activity {
         uiHandler.post(new Runnable() {
             @Override
             public void run() {
+                btnChooseBackup.setEnabled(enabled);
                 btnCheck.setEnabled(enabled);
                 btnSwitchSlotB.setEnabled(enabled);
                 btnRestoreSlotB.setEnabled(enabled);
@@ -563,7 +586,6 @@ public class MainActivity extends Activity {
     private void runTask(final String action) {
         final boolean useUsb = useUsbMode;
         final String tcpTarget = etTcpHost.getText().toString().trim();
-        final boolean promoteOta = cbPromoteOta.isChecked();
         final boolean autoReboot = cbAutoReboot.isChecked();
 
         if (useUsb) {
@@ -575,7 +597,7 @@ public class MainActivity extends Activity {
             if (!usbManager.hasPermission(dev)) {
                 appendLog("[USB] Requesting USB permission for " + dev.getDeviceName() + "...");
                 int flags = Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_MUTABLE : 0;
-                PendingIntent pi = PendingIntent.getBroadcast(this, 0, new Intent(ACTION_USB_PERMISSION), flags);
+                PendingIntent pi = PendingIntent.getBroadcast(this, 0, new Intent(ACTION_USB_PERMISSION).setPackage(getPackageName()), flags);
                 usbManager.requestPermission(dev, pi);
                 return;
             }
@@ -609,7 +631,7 @@ public class MainActivity extends Activity {
                         }
                         appendLog("[DONE] Active slot set to B!");
                     } else if ("restore".equals(action)) {
-                        performSlotBRestore(transport, curSlot, promoteOta, autoReboot);
+                        performSlotBRestore(transport, autoReboot);
                     }
                 } catch (Exception e) {
                     appendLog("[ERROR] " + e.getMessage());
@@ -630,34 +652,24 @@ public class MainActivity extends Activity {
         return s;
     }
 
-    private void performSlotBRestore(FastbootTransport fb, String curSlot, boolean promoteOta, boolean autoReboot) throws Exception {
-        ImageSource bootImg = resolveImage("boot_b.img", true);
-        ImageSource initBootImg = resolveImage("init_boot_b.img", true);
-        ImageSource vendorBootImg = resolveImage("vendor_boot_b.img", true);
-        ImageSource vbmetaImg = resolveImage("vbmeta_b.img", false);
-
-        String targetSlot = "b";
-        if ("b".equals(curSlot) && promoteOta) {
-            targetSlot = "a";
-            appendLog("[OTA-Safe] Detected current-slot=b: staging Linux into Slot A so Linux promotes Android OTA (Slot B -> Slot A) on boot!");
-        } else {
-            appendLog("[Restore] Flashing Linux images directly to Slot B...");
+    private void performSlotBRestore(FastbootTransport fb, boolean autoReboot) throws Exception {
+        String[] partitions = {"boot_b", "init_boot_b", "vendor_boot_b"};
+        ImageSource[] images = new ImageSource[partitions.length];
+        for (int i = 0; i < partitions.length; i++) {
+            images[i] = resolveImage(partitions[i] + ".img");
+            try (InputStream in = images[i].open()) {
+                BootImages.validate(partitions[i], in, images[i].size);
+            }
+            long capacity = Long.parseLong(fb.getVar("partition-size:" + partitions[i]).replaceFirst("^0[xX]", ""), 16);
+            if (images[i].size > capacity) throw new IOException("Image exceeds " + partitions[i]);
         }
-
-        flashOne(fb, "boot_" + targetSlot, bootImg);
-        flashOne(fb, "init_boot_" + targetSlot, initBootImg);
-        flashOne(fb, "vendor_boot_" + targetSlot, vendorBootImg);
-        if (vbmetaImg != null) {
-            flashOne(fb, "vbmeta_" + targetSlot, vbmetaImg);
-        }
-
-        appendLog("[Fastboot] Setting active slot to '" + targetSlot + "'...");
-        fb.sendCommand("set_active:" + targetSlot);
-        if (autoReboot) {
-            appendLog("[Fastboot] Rebooting Googlebook...");
-            fb.sendCommand("reboot");
-        }
-        appendLog("[SUCCESS] Linux Slot B restore complete!");
+        long[] config = BootImages.vendorLocation(fb.fetch(0, 2128));
+        BootImages.requireLinux(fb.fetch(config[0], (int) config[1]));
+        appendLog("[Restore] Verified Linux in Slot B. Restoring its three boot images...");
+        for (int i = 0; i < partitions.length; i++) flashOne(fb, partitions[i], images[i]);
+        fb.sendCommand("set_active:b");
+        if (autoReboot) fb.sendCommand("reboot");
+        appendLog("[SUCCESS] Linux Slot B restored. Slot A and Android metadata were not rewritten.");
     }
 
     private void flashOne(FastbootTransport fb, String partition, ImageSource src) throws Exception {
@@ -677,6 +689,8 @@ public class MainActivity extends Activity {
         final File file;
         final AssetManager assets;
         final String assetPath;
+        final ContentResolver resolver;
+        final Uri uri;
 
         ImageSource(File f) {
             this.label = f.getAbsolutePath();
@@ -684,6 +698,8 @@ public class MainActivity extends Activity {
             this.file = f;
             this.assets = null;
             this.assetPath = null;
+            this.resolver = null;
+            this.uri = null;
         }
 
         ImageSource(AssetManager am, String path, long size) {
@@ -692,9 +708,26 @@ public class MainActivity extends Activity {
             this.file = null;
             this.assets = am;
             this.assetPath = path;
+            this.resolver = null;
+            this.uri = null;
+        }
+
+        ImageSource(ContentResolver resolver, Uri uri, long size) {
+            this.label = uri.toString();
+            this.size = size;
+            this.file = null;
+            this.assets = null;
+            this.assetPath = null;
+            this.resolver = resolver;
+            this.uri = uri;
         }
 
         InputStream open() throws IOException {
+            if (uri != null) {
+                InputStream stream = resolver.openInputStream(uri);
+                if (stream == null) throw new IOException("Cannot read " + label);
+                return new BufferedInputStream(stream, 262144);
+            }
             if (file != null) {
                 return new BufferedInputStream(new FileInputStream(file), 262144);
             }
@@ -702,11 +735,19 @@ public class MainActivity extends Activity {
         }
     }
 
-    private ImageSource resolveImage(String name, boolean required) throws IOException {
-        File dlDir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "slotb-backup");
-        File f1 = new File(dlDir, name);
-        if (f1.isFile() && f1.canRead() && f1.length() > 0) {
-            return new ImageSource(f1);
+    private ImageSource resolveImage(String name) throws IOException {
+        if (backupTree != null) {
+            Uri children = DocumentsContract.buildChildDocumentsUriUsingTree(backupTree, DocumentsContract.getTreeDocumentId(backupTree));
+            String[] columns = {DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME, DocumentsContract.Document.COLUMN_SIZE};
+            try (Cursor cursor = getContentResolver().query(children, columns, null, null, null)) {
+                if (cursor != null) while (cursor.moveToNext()) {
+                    if (name.equals(cursor.getString(1)) && !cursor.isNull(2) && cursor.getLong(2) > 0) {
+                        Uri document = DocumentsContract.buildDocumentUriUsingTree(backupTree, cursor.getString(0));
+                        return new ImageSource(getContentResolver(), document, cursor.getLong(2));
+                    }
+                }
+            }
+            throw new IOException("Missing or empty " + name + " in selected backup folder");
         }
         File extDir = new File(getExternalFilesDir(null), "slotb-backup");
         File f2 = new File(extDir, name);
@@ -723,10 +764,7 @@ public class MainActivity extends Activity {
             }
         } catch (IOException ignored) {
         }
-        if (required) {
-            throw new IOException("Missing " + name + ". Place boot_b.img, init_boot_b.img, vendor_boot_b.img in /sdcard/Download/slotb-backup/");
-        }
-        return null;
+        throw new IOException("Missing " + name + ". Choose a folder containing boot_b.img, init_boot_b.img, vendor_boot_b.img");
     }
 
     private UsbDevice findFastbootUsbDevice() {
@@ -808,6 +846,7 @@ public class MainActivity extends Activity {
         String sendCommand(String cmd) throws IOException;
         String getVar(String name) throws IOException;
         void flashPartition(String partition, InputStream data, long size) throws IOException;
+        byte[] fetch(long offset, int size) throws IOException;
         void close();
     }
 
@@ -828,7 +867,7 @@ public class MainActivity extends Activity {
         public String sendCommand(String cmd) throws IOException {
             byte[] outBytes = cmd.getBytes(StandardCharsets.UTF_8);
             int w = conn.bulkTransfer(epOut, outBytes, outBytes.length, 5000);
-            if (w < 0) {
+            if (w != outBytes.length) {
                 throw new IOException("USB write failed for command: " + cmd);
             }
             return readResponse();
@@ -880,6 +919,21 @@ public class MainActivity extends Activity {
             }
             readResponse();
             sendCommand("flash:" + partition);
+        }
+
+        @Override
+        public byte[] fetch(long offset, int size) throws IOException {
+            String response = sendCommand(String.format(Locale.US, "fetch:vendor_boot_b:0x%08x:0x%08x", offset, size));
+            if (!response.equals(String.format(Locale.US, "DATA%08x", size))) throw new IOException("Cannot verify Slot B: fetch unsupported or wrong size");
+            byte[] result = new byte[size];
+            int received = 0;
+            while (received < size) {
+                int n = conn.bulkTransfer(epIn, result, received, Math.min(16384, size - received), 60000);
+                if (n <= 0) throw new IOException("Incomplete Fastboot fetch");
+                received += n;
+            }
+            if (readResponse().startsWith("DATA")) throw new IOException("Unexpected fetch response");
+            return result;
         }
 
         @Override
@@ -968,6 +1022,22 @@ public class MainActivity extends Activity {
             }
             readResponse();
             sendCommand("flash:" + partition);
+        }
+
+        @Override
+        public byte[] fetch(long offset, int size) throws IOException {
+            String response = sendCommand(String.format(Locale.US, "fetch:vendor_boot_b:0x%08x:0x%08x", offset, size));
+            if (!response.equals(String.format(Locale.US, "DATA%08x", size))) throw new IOException("Cannot verify Slot B: fetch unsupported or wrong size");
+            byte[] result = new byte[size];
+            int received = 0;
+            while (received < size) {
+                long packet = in.readLong();
+                if (packet <= 0 || packet > size - received) throw new IOException("Invalid fetch packet size");
+                in.readFully(result, received, (int) packet);
+                received += (int) packet;
+            }
+            if (readResponse().startsWith("DATA")) throw new IOException("Unexpected fetch response");
+            return result;
         }
 
         @Override

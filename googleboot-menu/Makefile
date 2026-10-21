@@ -4,7 +4,7 @@ LIBS := -lm -lz
 
 all: bin/googleboot-menu
 
-bin/googleboot-menu: src/googleboot-menu.c
+bin/googleboot-menu: src/googleboot-menu.c src/google_sans_atlas.h
 	mkdir -p bin
 	$(CC) $(CFLAGS) -o $@ $< $(LIBS)
 

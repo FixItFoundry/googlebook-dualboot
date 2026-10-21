@@ -1,15 +1,16 @@
 #!/bin/bash
 # build-uefi-bridge.sh
 # Compiles Das U-Boot (coreboot64_defconfig + EFI_LOADER + NVMe + Coreboot Framebuffer)
-# into a kexec-bootable x86_64 bzImage (/boot/uefi-bridge.bzImage) so that
-# googleboot-menu can chainload bare-metal Windows 11 (/EFI/Microsoft/Boot/bootmgfw.efi)
-# or any UEFI OS installer without modifying the laptop's SPI flash ROM.
+# into an experimental ELF artifact. This is not a validated kexec payload
+# and does not provide a supported Windows boot path.
 
 set -euo pipefail
 
 UBOOT_TAG="${UBOOT_TAG:-v2025.01}"
 WORK_DIR="${WORK_DIR:-/tmp/googlebook-uboot-efi}"
-OUT_FILE="${1:-/boot/uefi-bridge.bzImage}"
+OUT_FILE="${1:-./uefi-bridge.elf}"
+mkdir -p "$(dirname "$OUT_FILE")"
+OUT_FILE="$(cd "$(dirname "$OUT_FILE")" && pwd)/$(basename "$OUT_FILE")"
 
 echo "==> Building Googlebook Moonstone Bare-Metal UEFI Bridge ($UBOOT_TAG)..."
 mkdir -p "$WORK_DIR"
@@ -39,6 +40,6 @@ make olddefconfig
 make -j"$(nproc)"
 
 if [[ -f u-boot.rom ]]; then
-  cp -f u-boot "$OUT_FILE.elf"
-  echo "==> Built U-Boot UEFI payload at $OUT_FILE.elf"
+  cp -f u-boot "$OUT_FILE"
+  echo "==> Experimental U-Boot ELF: $OUT_FILE (not a bootable bzImage)"
 fi

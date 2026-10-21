@@ -1,131 +1,28 @@
-# Installing Any Operating System & Seamless OS Switching on the Acer Googlebook 14 (`Moonstone`)
+# Other Linux Distributions and OS Switching
 
-The Acer Googlebook 14 (`GP714-91N`, Intel Panther Lake `x86_64`) uses **Coreboot + Depthcharge** with **Android Boot Image v4** partitions instead of standard UEFI (`OVMF`/`edk2`).
+The tested hardware is the Acer Googlebook 14 (Moonstone). The toolkit has Fedora-oriented assumptions: dracut, systemd, the target kernel's development headers, an ext4 `/boot` on partition 11, and Linux root on partition 32. Other distributions need their own installation and boot validation; a kernel that can be packed is not proof that the entire distribution works.
 
-Despite this firmware design, the dual-boot architecture in this repository is **not limited to Fedomakase / Fedora 44**—it can boot **any `x86_64` Linux distribution** (Arch Linux, Vanilla Omarchy, Ubuntu, Debian, CachyOS, NixOS, Gentoo, etc.).
+## Packing an Installed Kernel
 
----
+Use [`googlebook-pack-slotb`](../bin/googlebook-pack-slotb) from inside the installed system, with its `/boot` mounted. Follow the [chroot procedure](../README.md#step-3-partition--pack-slot-b) instead of running against the live installer's root. The packer finds `boot_b`, `init_boot_b`, and `vendor_boot_b` by partition label on the selected disk. The current Moonstone map is p14, p19, and p21 respectively; inspect the disk before writing.
 
-## Part 1: Opening This Setup to Any Operating System
+Install the repository under `/usr/local/share/googlebook-dualboot` and link its packer into `/usr/local/bin` as shown in the README. This preserves access to the module sources and menu installer. The packer installs `/etc/kernel/install.d/95-googlebook-slotb.install`; distributions that do not call `kernel-install` need their own tested integration. Do not copy the old `fedomakase-googlebook-slotb` examples: that executable is not part of this branch.
 
-There are **two ways** to support any Linux distribution on Slot B (`boot_b` / `init_boot_b` / `vendor_boot_b`):
+## Boot Menu Limits
 
-### Approach A: Universal Slot B Kernel Packer (Direct Boot)
+The scanner understands BootLoaderSpec entries and selected `/boot/vmlinuz-*` layouts. It also detects several common live USB layouts. This is not a universal GRUB, UKI, NixOS, or distro configuration parser. Display handoff and `kexec` behavior need validation for each target kernel. The fallback command line assumes a Btrfs `root` subvolume; distributions with another layout should supply correct BootLoaderSpec entries.
 
-[`bin/fedomakase-googlebook-slotb`](../bin/fedomakase-googlebook-slotb) works on any Linux distribution installed on `nvme0n1p31` (`/boot`) and `nvme0n1p32` (`/`).
+## Switching Slots
 
-Whenever your distro installs or updates a kernel:
-1. It compiles (or copies) the two tiny Coreboot modules (`coreboot_table.ko` and `framebuffer-coreboot.ko`, ~35 KB total) against the target kernel's headers (`/lib/modules/$KVER/build`).
-2. It builds a slim initramfs (`<= 40 MiB`) split across `vendor_boot_b` (`32 MiB`) and `init_boot_b` (`8 MiB`), keeping the massive `/usr/lib/firmware/xe/*` GPU blobs on the root filesystem (`/sysroot`) where they are loaded after root mount.
-3. It packs `boot_b.img`, `init_boot_b.img`, and `vendor_boot_b.img` with [`bin/mkbootimg`](../bin/mkbootimg) and writes them directly to `/dev/nvme0n1p4`, `/dev/nvme0n1p6`, and `/dev/nvme0n1p8`.
-
-#### Automatic Kernel Upgrade Hooks by Distro
-
-- **Fedora / RHEL / CentOS (`/etc/kernel/install.d/99-googlebook-slotb.install`)**:
-  Automatically installed by `fedomakase-googlebook-slotb`.
-- **Arch Linux / Vanilla Omarchy / CachyOS (`/etc/pacman.d/hooks/99-googlebook-slotb.hook`)**:
-  ```ini
-  [Trigger]
-  Operation = Install
-  Operation = Upgrade
-  Type = Path
-  Target = usr/lib/modules/*/vmlinuz
-
-  [Action]
-  Description = Packing Googlebook Slot B Android Boot Images...
-  When = PostTransaction
-  Exec = /usr/local/bin/fedomakase-googlebook-slotb
-  ```
-- **Ubuntu / Debian (`/etc/kernel/postinst.d/zz-googlebook-slotb`)**:
-  ```bash
-  #!/bin/sh
-  KVER="$1"
-  exec /usr/local/bin/fedomakase-googlebook-slotb "$KVER"
-  ```
-
----
-
-### Approach B: Slot B as a Universal `kexec` Bootloader (Zero Distro Modifications)
-
-If you want to boot **completely unmodified** Linux distributions or standard live USB installers without worrying about:
-- the `32 MiB + 8 MiB` Slot B ramdisk partition size limit, or
-- compiling `coreboot_table.ko` and `framebuffer-coreboot.ko` for every new distro kernel,
-
-you can flash a **permanent tiny Linux + `kexec` bootloader** (LinuxBoot / Petitboot style) into Slot B (`boot_b` + `vendor_boot_b`):
-
-```
-Power On (Slot B Active)
-  └── Depthcharge loads Slot B Mini-Kernel (7.2.11 + framebuffer-coreboot.ko)
-        ├── Lights up 2880x1800 OLED display via Coreboot Framebuffer
-        ├── Displays TUI Boot Menu:
-        │     1. Boot Installed Linux on NVMe (reads /boot/loader/entries/*.conf or grub.cfg)
-        │     2. Boot Live USB Installer (scans any plugged-in USB drive for ISO/EFI/boot)
-        │     3. Reboot into Android 17 (flips GPT slot to Slot A & reboots)
-        └── Runs `kexec -l <vmlinuz> --initrd=<full-size-initramfs.img> --command-line=... && kexec -e`
+```bash
+sudo googlebook-switch-slot status
+sudo googlebook-switch-slot android --reboot
+sudo googlebook-switch-slot android-once --reboot
+sudo googlebook-switch-slot linux --reboot
 ```
 
-#### Why `kexec` Solves Both the Size Limit and the Display Driver Problem:
-1. **No Initramfs Size Limit**: The target OS's kernel and full-size `initramfs` (`60–150 MiB`) stay on `/dev/nvme0n1p31` (`linux_boot`, `2 GiB` ext4) or on the USB thumb drive. Slot B never needs to be reflashed when you update or switch distros.
-2. **No Custom Kernel Modules Needed in Target OS**:
-   Depthcharge passes the display framebuffer inside the Coreboot table (`LB_TAG_FRAMEBUFFER`), which standard distro kernels ignore (`# CONFIG_GOOGLE_FRAMEBUFFER_COREBOOT is not set`).
-   However, once the Slot B mini-kernel loads `framebuffer-coreboot.ko`, Linux knows the physical framebuffer address, resolution (`2880x1800`), and stride (`11520`). When `kexec` loads the target distro's kernel, `kexec` populates the standard x86 zero-page `boot_params.screen_info` (`VIDEO_TYPE_VLFB = 0x23`), which **every** standard Linux kernel's built-in `sysfb` + `simpledrm` driver supports natively out of the box!
+The one-shot setting depends on Android not marking Slot A successful again. Do not promise that every Android reboot returns automatically to Linux. From Fastboot, `fastboot --set-active=b` selects B; it does not prove that Linux is still installed there.
 
----
+## Android Updates
 
-## Part 2: How to Easily Switch Between Operating Systems
-
-Because Depthcharge selects **Slot A (Android 17)** vs. **Slot B (Linux)** using the GPT attribute flags on `boot_a`/`vbmeta_a` (`p3`/`p15`) and `boot_b`/`vbmeta_b` (`p4`/`p16`), you can switch operating systems in several ways:
-
-### 1. Switching from Linux → Android 17
-
-From a terminal (or bound to a desktop shortcut / Waybar power menu):
-
-- **Permanent Switch to Android 17** (boots Android until you switch back to Slot B):
-  ```bash
-  sudo googlebook-switch-slot android --reboot
-  # or using the shorthand symlink:
-  sudo boot-android --reboot
-  ```
-
-- **One-Shot Boot into Android 17** (`android-once`):
-  ```bash
-  sudo googlebook-switch-slot android-once --reboot
-  ```
-  This sets **Slot A** to `Priority=15, Tries=1, Successful=0` (`0x001f000000000000`) while keeping **Slot B (Linux)** at `Priority=14, Tries=0, Successful=1` (`0x010e000000000000`). Depthcharge decrements `Tries` to `0` when booting Slot A; if Slot A is not re-marked successful, the next reboot automatically returns to Linux.
-
-### 2. Switching from Android 17 → Linux
-
-Depending on whether you have root/ADB enabled in Android or are using hardware keys:
-
-1. **Via Fastboot (No Android Root Required)**:
-   - Reboot and hold **Volume Up** (or select **Fastboot** on the bootloader screen).
-   - From any computer or phone over USB-C:
-     ```bash
-     fastboot --set-active=b && fastboot reboot
-     ```
-2. **Directly on the Laptop Inside Android 17 (Termux + Wireless Debugging / Root)**:
-   - **If Rooted (`Magisk` / `KernelSU` / `apatch`)**:
-     Run inside Termux on Android:
-     ```bash
-     su -c 'bootctl set-active-boot-slot 1 && svc power reboot'
-     ```
-   - **Without Root (Termux + Android Wireless Debugging)**:
-     Pair Termux `adb` once with Android's built-in **Developer Options → Wireless Debugging** (`localhost`), then run a 1-click Termux Widget shortcut on your Android home screen:
-     ```bash
-     adb connect localhost:$PORT && adb shell reboot bootloader
-     ```
-3. **Via Slot B Boot Menu (Zero Commands Needed in Android)**:
-   - Keep **Slot B** as your default slot (`Successful=1, Priority=14`) and include a 3-second boot menu in Slot B (`1. Linux [default]`, `2. Android 17`). When you boot Android via one-shot (`Tries=1, Successful=0`), simply clicking **Restart** inside Android drops you right back into the Slot B menu!
-
----
-
-## Part 3: Googlebook OS (Android 17) OTA Update Caveat & Recovery
-
-> [!WARNING]
-> **OTA Update Requirement:** Because Googlebook OS on Slot A uses A/B OTA updates (`update_engine`), applying an OTA writes the new Android OS into **Slot B** (`boot_b`, `init_boot_b`, `vendor_boot_b`, `vbmeta_b`) and sets Slot B active. On an unrooted `user` build (`ro.debuggable=0`), neither `adb shell` nor the built-in Debian VM (`crosvm`) has write access to `/dev/block/nvme0n1*`.
->
-> Consequently, **upgrading Googlebook OS via OTA requires either**:
-> 1. **An external device handy** (a Mac/Linux PC, or an Android phone via USB-C OTG / TCP Fastboot `tcp:<IP>:5554`) with [`bin/googlebook-restore-slotb`](../bin/googlebook-restore-slotb), `adb`/`fastboot`, and your `slotb-backup/*.img` files to re-stage Linux after the OTA finishes merging, **OR**
-> 2. **Rooting Googlebook OS (`init_boot_a`)**, which defeats keeping a stock unrooted Slot A for OTA updates.
->
-> **Disable Automatic Background OTAs:** Run `adb shell settings put global ota_disable_automatic_update 1` (or disable **Settings $\rightarrow$ System $\rightarrow$ Developer options $\rightarrow$ Automatic system updates**) so Googlebook OS never auto-installs an OTA while you are away from your recovery device.
+Android OTA promotion and post-OTA Linux recovery are unsupported. An A/B OTA can replace Linux in Slot B. The updated restore tools require positive identification of Linux in B and refuse Android or unknown images; they never copy B over A or rewrite `super`. See the [recovery limitations and upgrade steps](../README.md#restoring-an-existing-linux-slot-b).

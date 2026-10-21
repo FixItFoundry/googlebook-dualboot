@@ -1,6 +1,6 @@
-# Googlebook 14 (`Moonstone`) Universal Dual-Boot Toolkit
+# Googlebook 14 (`Moonstone`) Dual-Boot Toolkit
 
-Universal dual-boot toolkit, graphical `kexec` bootloader (`googleboot-menu`), Coreboot framebuffer kernel modules, and Depthcharge Slot B scripts for running **Googlebook OS / Android 17 (Slot A)** alongside **any Linux distribution (Fedora, Arch, Ubuntu, Debian, NixOS, CachyOS) or Windows 11 (Slot B)** on the **Acer Googlebook 14 (`GP714-91N`, `Moonstone` / `Google_Fatcat`, Intel Panther Lake `x86_64`)**.
+Linux dual-boot tools, a graphical `kexec` boot menu, and Coreboot/Panther Lake hardware modules for the **Acer Googlebook 14 (`GP714-91N`, `Moonstone` / `Google_Fatcat`)**. The working configuration is Googlebook OS / Android 17 on Slot A and Linux on Slot B. Other distributions require their own validation; Windows boot is experimental and is not supported by the supplied bridge builder.
 
 > [!IMPORTANT]
 > **Hardware Validation Notice:** This repository and its partition layout, Depthcharge A/B slot tooling, and Coreboot/Panther Lake kernel modules have **only been validated on the Acer Googlebook 14 (`GP714-91N`, board `Moonstone` / `Google_Fatcat`)**. Other Googlebook / Aluminum OS boards may use different partition numbering, display panels, or EC/audio topologies and are not yet validated.
@@ -20,20 +20,15 @@ The Acer Googlebook 14 (`Moonstone`, board family `Google_Fatcat`) uses:
 ### How A/B Dual-Boot Works
 | Slot | OS | Boot Partitions | Root Filesystem |
 | :--- | :--- | :--- | :--- |
-| **Slot A** | Googlebook OS / Android 17 (Factory OS) | `boot_a` (`p13`), `init_boot_a` (`p18`), `vendor_boot_a` (`p20`), `vbmeta_a` (`p15`) | `super` (`p3`) + `userdata` (`p1`) |
+| **Slot A** | Googlebook OS / Android 17 (Factory OS) | `boot_a` (`p13`), `init_boot_a` (`p18`), `vendor_boot_a` (`p20`), `vbmeta_a` (`p15`) | `super` (`p3`) + factory partition labeled `userdata` |
 | **Slot B** | Linux (`googleboot-menu` + Target Distro) | `boot_b` (`p14`, 64 MiB), `init_boot_b` (`p19`, 8 MiB), `vendor_boot_b` (`p21`, 32 MiB), `vbmeta_b` (`p16`) | `p11` (`ext4` `/boot`, 2 GiB) + `p32` (`LUKS2` or plain `Btrfs`/`ext4` root) |
 
-Depthcharge selects the active boot slot by reading the ChromeOS/Depthcharge GPT attribute flags on `vbmeta_a` (`p15`) and `vbmeta_b` (`p16`). All 31 factory Android partitions remain 100% untouched.
+Depthcharge selects the active boot slot by reading the ChromeOS/Depthcharge GPT attribute flags on `vbmeta_a` (`p15`) and `vbmeta_b` (`p16`). The Linux setup repurposes the Slot B boot partitions and the verified Linux `/boot` slot. It does not preserve the factory layout byte-for-byte. Confirm partition labels and sector ranges on your own disk before partitioning; do not infer the location of `userdata` from an example partition number.
 
 > [!WARNING]
-> **Googlebook OS (Android 17) OTA Update Limitation:**
-> Because this dual-boot methodology repurposes **Slot B** (`boot_b`, `init_boot_b`, `vendor_boot_b`, `vbmeta_b`) for Linux while keeping **Slot A** on stock, unrooted Googlebook OS (`user` build, `ro.debuggable=0`):
-> - Whenever Googlebook OS applies an A/B OTA update (`update_engine`), Android writes the new OS into the inactive slot (**Slot B**) and switches the active boot slot to **Slot B**, overwriting `googleboot-menu`.
-> - On an unrooted `user` build, neither `adb shell` (`uid=2000`) nor the built-in Debian Linux VM (`crosvm` virtual disk `/dev/vda`) has raw write access to `/dev/block/nvme0n1*`.
-> - **Therefore, you cannot upgrade Googlebook OS via OTA and return to Linux without either:**
->   1. **Having a second device handy** (a Mac/Linux PC, or an Android phone over USB-C OTG / TCP Fastboot `tcp:<IP>:5554`) with [`bin/googlebook-restore-slotb`](bin/googlebook-restore-slotb), `adb`/`fastboot`, and a copy of your `slotb-backup/` images (`boot_b.img`, `init_boot_b.img`, `vendor_boot_b.img`, `vbmeta_b.img`), **OR**
->   2. **Rooting Googlebook OS (`init_boot_a`)**, which defeats the purpose of keeping an unrooted stock OS for seamless OTAs.
-> - **Preventing Accidental Background OTAs While Traveling:** Disable *Automatic system updates* in Googlebook OS (**Settings $\rightarrow$ System $\rightarrow$ Developer options $\rightarrow$ Automatic system updates = OFF**, or via ADB: `adb shell settings put global ota_disable_automatic_update 1`) so Googlebook OS never applies an OTA in the background while you are away from your recovery device.
+> **Android OTA recovery is unsupported in this revision.** An A/B OTA can replace Linux in Slot B. The recovery tools now refuse Android or unrecognized Slot B images and never stage Linux into Slot A or rewrite `super` metadata. A second device alone does not make post-OTA recovery safe.
+> Keep a complete disk backup and a tested factory recovery path before applying an OTA. Do not rely on the developer-options automatic-update toggle as a guarantee against every update path.
+> The old automatic promotion hook has been removed because it could misidentify Linux and overwrite Android. See the recovery section before upgrading an existing installation.
 
 ---
 
@@ -47,7 +42,7 @@ When upgrading from the factory 512 GB NVMe to a 1 TB / 2 TB NVMe, there are two
 3. Once installation completes, power off, swap the 1 TB / 2 TB NVMe into the internal M.2 slot, and boot.
 
 **Why Option A is cleaner and safer:**
-- The original 512 GB NVMe is never modified and serves as an untouched hardware backup.
+- The clone operation reads the original NVMe. Booting the Slot B installer already changes its Slot B boot partitions, so retain a separate factory backup if you need an unchanged factory image.
 - No third computer or external Linux host is needed to clone the drives.
 - Because [`googlebook-pack-slotb`](bin/googlebook-pack-slotb) and `crypttab`/`fstab` reference partitions strictly by **filesystem/LUKS UUID** (`UUID=...`), moving the drive from `/dev/sda` (USB-C) to `/dev/nvme0n1` (internal M.2) requires zero `fstab` or `crypttab` changes.
 
@@ -63,7 +58,8 @@ When upgrading from the factory 512 GB NVMe to a 1 TB / 2 TB NVMe, there are two
 ### Prerequisites
 - Acer Googlebook 14 (`Moonstone`) with OEM Unlock / Developer Mode enabled (`fastboot flashing unlock`).
 - USB-C Ethernet adapter (recommended for Fastboot over TCP and fast package downloads) and a USB-C NVMe enclosure (if upgrading the SSD via Option A).
-- `android-platform-tools` (`fastboot`, `mkbootimg`) installed on your host computer.
+- A Linux build host with Python 3, Bash, dracut, cpio, zstd, make, a C compiler, zlib development headers, kmod, util-linux, coreutils, GPT fdisk (`sgdisk`), and the target kernel's development headers/modules. The repository includes the unsigned-image `mkbootimg` path; optional GKI signing needs the upstream GKI companion module.
+- Android platform tools (`adb`/`fastboot`) on a recovery host. Verified Fastboot restore additionally requires device support for `fetch`; unsupported devices are refused before flashing.
 
 ### Step 1: Boot the Slot B Installer
 1. Build the Slot B installer images (`boot_b.img`, `init_boot_b.img`, `vendor_boot_b.img`):
@@ -88,11 +84,25 @@ Once the installer boots, clone the internal 512 GB NVMe (`/dev/nvme0n1`) to the
 > Running `sgdisk -e /dev/sda` is mandatory after block-cloning a 512 GB drive to a 1 TB+ drive. Without `sgdisk -e`, the GPT usable sector boundary (`LastUsableLBA`) remains capped at the 512 GB mark, hiding the upper 476+ GiB of unallocated space from `parted` and OS installers.
 
 ### Step 3: Partition & Pack Slot B
-1. Create partition `11` (`2 GiB`, `ext4`, mounted at `/boot`, reusing the empty 1 MiB `efi` slot number in the free space after `userdata` `p31`) and partition `32` (remaining ~475 GiB for your Linux rootfs, plain or `LUKS2`).
-2. After installing your Linux distribution into `/mnt` or `/mnt/sysroot`, pack the installed kernel, Coreboot framebuffer modules, and [`googleboot-menu`](googleboot-menu/README.md) into `boot_b` (`p14`), `init_boot_b` (`p19`), and `vendor_boot_b` (`p21`):
+1. Inspect `lsblk -o NAME,SIZE,FSTYPE,PARTLABEL,MOUNTPOINTS` and `sgdisk -p /dev/sda` (or the actual target disk). Preserve every factory data partition, especially the one labeled `userdata`. The current Moonstone tools expect Linux `/boot` on partition 11 and root on partition 32. Reuse partition 11 only after confirming that it is the disposable factory `efi` entry on this disk, and allocate its replacement extent and partition 32 in verified free space. Stop if the labels or layout differ; this guide does not automate partition creation.
+2. Install Linux with that ext4 `/boot` and the chosen root filesystem. Mount the installed root at `/mnt/sysroot` and its **own** `/boot` at `/mnt/sysroot/boot`. Install the build dependencies above inside the target system before packing.
+3. From the repository directory in the installer, enter the installed system. These commands assume the two mounts above already exist:
+
    ```bash
-   sudo ./bin/googlebook-pack-slotb
+   TARGET_ROOT=/mnt/sysroot
+   sudo mkdir -p "$TARGET_ROOT/usr/local/share/googlebook-dualboot" "$TARGET_ROOT/usr/local/bin"
+   sudo cp -a . "$TARGET_ROOT/usr/local/share/googlebook-dualboot/"
+   for path in dev proc sys run; do
+     sudo mount --rbind "/$path" "$TARGET_ROOT/$path"
+     sudo mount --make-rslave "$TARGET_ROOT/$path"
+   done
+   sudo chroot "$TARGET_ROOT" ln -sf /usr/local/share/googlebook-dualboot/bin/googlebook-pack-slotb /usr/local/bin/googlebook-pack-slotb
+   sudo chroot "$TARGET_ROOT" /usr/local/bin/googlebook-pack-slotb
+   # After packing succeeds or after diagnosing a failure:
+   for path in run sys proc dev; do sudo umount -R "$TARGET_ROOT/$path"; done
    ```
+
+   The packer reads the installed system's `/`, `/boot`, `/etc/crypttab`, and `/lib/modules`; do not run it directly against the live installer's root. Check its printed disk and partition targets before using this workflow on another layout.
 
 ---
 
@@ -125,29 +135,27 @@ sudo googlebook-switch-slot b
    fastboot --set-active=a && fastboot reboot
    ```
 
-### Restoring Slot B After a Googlebook OS (Android 17) OTA or Development Flash
-When Googlebook OS (on Slot A) applies an A/B OTA update (`update_engine`), it writes the new Android build into **Slot B** (`boot_b`, `init_boot_b`, `vendor_boot_b`, `vbmeta_b`, `pvmfw_b`, `recovery_b`, `ota_recovery_b`, and `*_b` inside `super` `p3`) and switches the active slot to B. Meanwhile, [`googlebook-pack-slotb`](bin/googlebook-pack-slotb) automatically saves a backup copy of your Linux Slot B images in `/boot/slotb-backup/` on `p11` (unencrypted `ext4`). Copy `/boot/slotb-backup/*.img` to `./slotb-backup/` on your recovery computer or phone so it is ready whenever you install an OTA.
+### Restoring an Existing Linux Slot B
 
-Run **[`googlebook-restore-slotb`](bin/googlebook-restore-slotb)** after any Googlebook OS OTA (once Android has booted into the updated slot and finished merging Virtual A/B snapshots) or `fastboot` flash:
-1. **Unrooted Googlebook OS (via Mac/PC or Android Phone over Fastboot / ADB)**:
-   - When invoked with `--adb` or `--fastboot` while `current-slot=b` (post-OTA), `googlebook-restore-slotb` stages your Linux `slotb-backup/*.img` into **Slot A** (`boot_a`, `init_boot_a`, `vendor_boot_a`, `vbmeta_a`) so the newly updated Android OTA in Slot B is not overwritten.
-   - As soon as Linux boots on the laptop (with full root access to `/dev/nvme0n1`), `googlebook-gpu-init.service` automatically runs `/boot/slotb-backup/googlebook-restore-slotb`, which promotes the new Googlebook OS build from **Slot B $\rightarrow$ Slot A** (including `super` `p3` `LpMetadata` at offset `12288`), restores Linux (`googleboot-menu`) to **Slot B**, and sets **Slot B** active.
-2. **Rooted Googlebook OS (`adb root` / `su`)**:
-   - Directly promotes Slot B $\rightarrow$ Slot A and restores Linux to Slot B from `/dev/block/nvme0n1p11` (`/boot/slotb-backup`), or installs `/data/adb/service.d/99-googlebook-restore-slotb.sh` via `--install-hook` to run automatically on post-OTA boot.
+The packer saves `boot_b.img`, `init_boot_b.img`, and `vendor_boot_b.img` in `/boot/slotb-backup/`. Copy this directory to your recovery host. Restoration validates all three backups and reads the existing Slot B vendor image to identify Linux from its actual bootconfig section. It does not infer the OS from `current-slot`.
 
 ```bash
-# Option 1 (Recommended for unrooted Googlebook OS): From your Mac/PC over ADB or Fastboot:
-./bin/googlebook-restore-slotb --adb --reboot
-# Or directly from Fastboot (USB-C cable or TCP fastboot tcp:<IP>:5554):
+# On Linux, with /boot mounted:
+sudo /usr/local/bin/googlebook-restore-slotb
+
+# From a host while the laptop is in Fastboot (requires fetch support):
 ./bin/googlebook-restore-slotb --fastboot ./slotb-backup --reboot
+./bin/googlebook-restore-slotb --fastboot tcp:<IP>:5554 ./slotb-backup --reboot
 
-# Option 2: From an Android phone (USB-C OTG cable or TCP Fastboot):
-# Install ./android-restore-app/bin/googlebook-slotb-restore.apk on your phone
-# (see ./android-restore-app/README.md) and tap "Set Active Slot = B" or "Flash & Restore Linux Slot B".
-
-# Option 3: On a rooted Googlebook OS (adb root / su), or to install the automatic root boot hook:
-./bin/googlebook-restore-slotb --adb --install-hook --reboot
+# From ADB over USB, retain the same device serial when entering Fastboot:
+./bin/googlebook-restore-slotb --adb ./slotb-backup --reboot
 ```
+
+A damaged or unreadable vendor image, unsupported Fastboot read-back, or an Android OTA in Slot B causes restoration to stop before flashing. This deliberately limits recovery: there is no unsafe override. The legacy `--no-promote` flag is accepted but does not bypass any check; `--install-hook` is rejected. `vbmeta` image contents, Slot A images and Android dynamic-partition metadata are not rewritten.
+
+The [phone app](android-restore-app/README.md) applies the same checks and uses Android's folder picker for backups. Only use “Set Slot B” when you know which OS is installed there; that action selects a slot and does not repair it.
+
+**Existing installations:** rebuild Slot B from the updated source and update `/boot/slotb-backup/googlebook-restore-slotb` and any installed copies. The new initramfs installs a GPU startup service without automatic recovery and removes the old broad disk/sudo grants. On a rooted Android installation, remove the previously installed `/data/adb/service.d/99-googlebook-restore-slotb.sh` hook before rebooting Android. Old initramfs images, scripts and APKs retain the unsafe behavior until replaced. These are deployment steps, not actions performed by a source update alone.
 
 ---
 
@@ -169,8 +177,12 @@ Run **[`googlebook-restore-slotb`](bin/googlebook-restore-slotb)** after any Goo
 
 ---
 
-## 6. Installing Other Linux Distros, Graphical `kexec` Menu & Bare-Metal Windows 11
+## 6. Other Distributions and Experimental Windows Research
 
 - **[`googleboot-menu/`](googleboot-menu/README.md)**: Graphical DRM/KMS + `kexec` universal bootloader (`2880x1800` OLED) with live-editable themes (`theme.conf`), built-in LUKS2 passphrase modal, hotplug USB ISO scanner, and One-Shot Googlebook OS slot switching.
-- **[`docs/ANY_DISTRO_AND_OS_SWITCHING.md`](docs/ANY_DISTRO_AND_OS_SWITCHING.md)**: Booting **any Linux distribution** (Fedora, Arch, Omarchy, Ubuntu, Debian, NixOS, CachyOS) and switching between Googlebook OS / Android 17 (Slot A) and Linux (Slot B).
-- **[`docs/WINDOWS_11_BARE_METAL_AND_CROSECBUS.md`](docs/WINDOWS_11_BARE_METAL_AND_CROSECBUS.md)**: Bare-metal Windows 11 chainloading via the RAM-resident **Das U-Boot `x86_64` UEFI Bridge** (`uefi-bridge.bzImage` -> `bootmgfw.efi`) and source-level analysis of **[`coolstar/crosecbus`](https://github.com/coolstar/crosecbus)** on Intel Panther Lake (`ACPI\GOOG0004`).
+- **[`docs/ANY_DISTRO_AND_OS_SWITCHING.md`](docs/ANY_DISTRO_AND_OS_SWITCHING.md)**: Requirements and limits for other distributions and OS switching.
+- **[`docs/WINDOWS_11_BARE_METAL_AND_CROSECBUS.md`](docs/WINDOWS_11_BARE_METAL_AND_CROSECBUS.md)**: Experimental Windows research. The builder emits a U-Boot ELF artifact, not a validated `kexec`-bootable bzImage.
+
+## 7. Local Checks
+
+Run `python3 -m unittest discover -s tests -v` and `./tests/check-menu.sh`. These use temporary files and mocked device commands. They do not flash a disk or establish hardware/OTA compatibility. See [tests/README.md](tests/README.md) for the Android validator check.

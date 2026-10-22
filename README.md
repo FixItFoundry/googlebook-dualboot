@@ -35,11 +35,14 @@ Depthcharge selects the active boot slot by reading the ChromeOS/Depthcharge GPT
 
 ---
 
-## 2. Recommended Workflow: USB-C Enclosure Clone & Install vs. Internal Install
+## 2. Storage Workflows: Upgrading NVMe vs. Using the Stock 512 GB SSD
 
+You can dual-boot Fedomakase Linux on Slot B either by upgrading to a larger NVMe drive or by shrinking the Android `userdata` partition on the factory 512 GB NVMe in-place.
+
+### Scenario 1: Upgrading to a 1 TB / 2 TB NVMe (`clone-and-expand-nvme.sh`)
 When upgrading from the factory 512 GB NVMe to a 1 TB / 2 TB NVMe, there are two ways to perform the clone and installation:
 
-### Option A (Recommended): Clone & Install While the New NVMe is in a USB-C Enclosure, Then Swap Internally
+#### Option A (Recommended): Clone & Install While the New NVMe is in a USB-C Enclosure, Then Swap Internally
 1. Keep the factory 512 GB NVMe inside the Googlebook (`nvme0n1`) and connect the new 1 TB / 2 TB NVMe via a USB-C NVMe enclosure (`/dev/sda`).
 2. Boot the Fedomakase Netinst environment in Slot B (in RAM), clone `/dev/nvme0n1` $\rightarrow$ `/dev/sda`, relocate the backup GPT header (`sgdisk -e /dev/sda`), and run the Fedomakase installer targeting `/dev/sda`.
 3. Once installation completes, power off, swap the 1 TB / 2 TB NVMe into the internal M.2 slot, and boot.
@@ -49,10 +52,16 @@ When upgrading from the factory 512 GB NVMe to a 1 TB / 2 TB NVMe, there are two
 - No third computer or external Linux host is needed to clone the drives.
 - Because `fedomakase-googlebook-slotb` and `crypttab`/`fstab` reference partitions strictly by **filesystem/LUKS UUID** (`UUID=...`), moving the drive from `/dev/sda` (USB-C) to `/dev/nvme0n1` (internal M.2) requires zero `fstab` or `crypttab` changes.
 
-### Option B: Clone Externally, Swap Drive First, Then Install Internally
+#### Option B: Clone Externally, Swap Drive First, Then Install Internally
 1. Clone the 512 GB NVMe to the 1 TB / 2 TB NVMe using an external dual-bay cloner or another Linux machine, and run `sgdisk -e` on the new drive.
 2. Install the 1 TB / 2 TB NVMe into the Googlebook's internal M.2 slot (`nvme0n1`).
 3. Flash the Slot B installer via Fastboot and install Fedomakase directly onto the unallocated space of `nvme0n1`.
+
+### Scenario 2: Using the Installed Factory 512 GB SSD (`shrink-googlebook-userdata.sh`)
+If you are keeping the stock 512 GB NVMe inside the Googlebook (`nvme0n1`), you can free unallocated space for Fedomakase without buying a new SSD or touching `super` or the A/B boot slots:
+1. Boot the Fedomakase Netinst environment in Slot B (in RAM) so `userdata` is unmounted.
+2. Run [`scripts/shrink-googlebook-userdata.sh`](scripts/shrink-googlebook-userdata.sh) to shrink the `ext4` `userdata` partition in-place (default target: `200 GiB`, preserving existing Android data, start sector, partition GUIDs, and GPT label, while automatically backing up the pre-shrink GPT table inside `userdata`).
+3. Install Fedomakase directly into the newly freed unallocated space on `/dev/nvme0n1` in the same session.
 
 ---
 
@@ -60,7 +69,7 @@ When upgrading from the factory 512 GB NVMe to a 1 TB / 2 TB NVMe, there are two
 
 ### Prerequisites
 - Acer Googlebook 14 (`Moonstone`) with OEM Unlock / Developer Mode enabled (`fastboot flashing unlock`).
-- USB-C Ethernet adapter (recommended for Fastboot over TCP and fast package downloads) and a USB-C NVMe enclosure (if upgrading the SSD via Option A).
+- USB-C Ethernet adapter (recommended for Fastboot over TCP and fast package downloads) and a USB-C NVMe enclosure (if upgrading the SSD via Scenario 1 Option A).
 - `android-platform-tools` (`fastboot`, `mkbootimg`) installed on your host computer.
 
 ### Step 1: Boot the Slot B Netinst Installer
@@ -77,13 +86,26 @@ When upgrading from the factory 512 GB NVMe to a 1 TB / 2 TB NVMe, there are two
    ./scripts/flash-slotb.sh ./slotb-installer tcp:<GOOGLEBOOK_IP>
    ```
 
-### Step 2: Clone Factory 512 GB NVMe to 1 TB / 2 TB NVMe & Expand GPT
-Once the installer boots (accessible on screen or via `ssh root@<GOOGLEBOOK_IP>`), clone the internal 512 GB NVMe (`/dev/nvme0n1`) to the USB-C 1 TB / 2 TB NVMe (`/dev/sda`) and move the backup GPT header to the end of the 1 TB disk:
+### Step 2: Prepare Unallocated Space (1 TB / 2 TB NVMe Upgrade OR Stock 512 GB SSD)
+
+Choose **one** of the two paths below from the Slot B installer RAM environment (accessible on screen or via `ssh root@<GOOGLEBOOK_IP>`):
+
+#### Path A — Upgrading to a 1 TB / 2 TB NVMe (`clone-and-expand-nvme.sh`)
+Clone the internal 512 GB NVMe (`/dev/nvme0n1`) to the USB-C 1 TB / 2 TB NVMe (`/dev/sda`) and move the backup GPT header to the end of the larger disk:
 ```bash
-./scripts/clone-and-expand-nvme.sh /dev/nvme0n1 /dev/sda
+sudo ./scripts/clone-and-expand-nvme.sh /dev/nvme0n1 /dev/sda
 ```
 > [!IMPORTANT]
 > Running `sgdisk -e /dev/sda` is mandatory after block-cloning a 512 GB drive to a 1 TB+ drive. Without `sgdisk -e`, the GPT usable sector boundary (`LastUsableLBA`) remains capped at the 512 GB mark, hiding the upper 476+ GiB of unallocated space from `parted` and Anaconda.
+
+#### Path B — Utilizing the Installed 512 GB SSD (`shrink-googlebook-userdata.sh`)
+Shrink the factory `ext4` `userdata` partition in-place on `/dev/nvme0n1` (default `200` GiB for Googlebook OS, leaving the remainder as unallocated free space for Fedomakase):
+```bash
+sudo ./scripts/shrink-googlebook-userdata.sh /dev/nvme0n1 200
+```
+- The script auto-detects `userdata` by GPT label (`p1` or `p31`), verifies `ext4` consistency and free-space slack, automatically saves a persistent pre-shrink GPT backup on NVMe inside `userdata` (`/.googlebook-gpt-backup/`), shrinks the filesystem (`resize2fs`), atomically truncates only the end sector of `userdata` (`sgdisk`), and expands `ext4` to match the partition boundary.
+- Once the script finishes, you can proceed directly to Step 3 in the same installer session.
+- **Integrated Recovery & Factory Reset:** Because `super` and all `*_a` boot/recovery partitions remain untouched, Android Recovery's *"Wipe data / factory reset"* (or `fastboot -w`) still works and reformats `userdata` in-place to its 200 GiB GPT size. **Do not run Factory Reset unless you want to wipe Android back to square one** (which also erases `/.googlebook-gpt-backup/` inside `userdata`). Reclaiming the full 512 GB for Android requires restoring `gpt-pre-shrink.bin` (`sgdisk --load-backup`) + `resize2fs`, or flashing a full Google USB/Fastboot factory recovery image.
 
 ### Step 3: Run the Interactive Fedomakase Installer
 On the Googlebook display (`tty3`), complete the Gum TUI wizard:

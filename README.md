@@ -1,4 +1,4 @@
-#Acer Googlebook 14 (`Moonstone`) Dual-Boot Toolkit
+#Acer Googlebook 14 Dual-Boot Toolkit
 <img width="1448" height="1086" alt="image" src="https://github.com/user-attachments/assets/fbbfb277-41df-4ff7-8bef-c04d6fe34f5b" />
 
 Linux dual-boot tools, a graphical `kexec` boot menu, and Coreboot/Panther Lake hardware modules for the **Acer Googlebook 14**. The working configuration is Googlebook OS on Slot A and Linux on Slot B. Other distributions require their own validation; Windows boot is experimental and is not supported by the supplied bridge builder.

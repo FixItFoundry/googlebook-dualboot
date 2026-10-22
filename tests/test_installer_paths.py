@@ -41,6 +41,80 @@ esac
             for name in ('boot_b.img', 'init_boot_b.img', 'vendor_boot_b.img'):
                 self.assertGreater((work / 'out' / name).stat().st_size, 0)
 
+    def test_shrink_userdata_script_guards_and_flow(self):
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp)
+            commands = work / 'commands'
+            commands.mkdir()
+            log = work / 'calls.log'
+            stubs = {
+                'sgdisk': f'''#!/bin/sh
+echo "sgdisk $*" >> "{log}"
+case "$1" in
+  -p)
+    cat <<'EOF'
+Number  Start (sector)    End (sector)  Size       Code  Name
+   1        39845888      1000215182   457.9 GiB   8300  userdata
+   3           69632        39845887   19.0 GiB    8300  super
+EOF
+    ;;
+  -i)
+    cat <<'EOF'
+Partition GUID code: 0FC63DAF-8483-4772-8E79-3D69D8477DE4 (Linux filesystem)
+Partition unique GUID: 11111111-2222-3333-4444-555555555555
+First sector: 39845888 (at 19.0 GiB)
+Last sector: 1000215182 (at 476.9 GiB)
+Partition size: 960369295 sectors (457.9 GiB)
+Attribute flags: 0000000000000000
+Partition name: 'userdata'
+EOF
+    ;;
+esac
+''',
+                'lsblk': '''#!/bin/sh
+case "$*" in
+  *"-lnno TYPE"*) echo "loop" ;;
+  *"-rno PATH,TYPE"*) printf "/dev/null disk\\n/dev/null part\\n" | sed '2s|/dev/null|/dev/null_p1|' ;;
+  *"-ndo FSTYPE"*) echo "ext4" ;;
+  *"-bdno SIZE"*) echo "491709079040" ;;
+  *) echo "nvme0n1p1 214748364800 ext4 userdata" ;;
+esac
+''',
+                'findmnt': '#!/bin/sh\nexit 1\n',
+                'mount': f'#!/bin/sh\necho "mount $*" >> "{log}"\nexit 0\n',
+                'umount': f'#!/bin/sh\necho "umount $*" >> "{log}"\nexit 0\n',
+                'e2fsck': f'#!/bin/sh\necho "e2fsck $*" >> "{log}"\nexit 1\n',
+                'dumpe2fs': '#!/bin/sh\nprintf "Block size: 4096\\nFree blocks: 100000000\\n"\n',
+                'resize2fs': f'#!/bin/sh\necho "resize2fs $*" >> "{log}"\n',
+                'partprobe': '#!/bin/sh\nexit 0\n',
+                'udevadm': '#!/bin/sh\nexit 0\n',
+            }
+            for name, source in stubs.items():
+                p = commands / name
+                p.write_text(source)
+                p.chmod(0o755)
+            persist_dir = work / 'persist'
+            persist_dir.mkdir()
+            script = (ROOT / 'scripts/shrink-googlebook-userdata.sh').read_text()
+            # Replace root/block node checks in temp copy to test logic without root
+            script = script.replace('if (( EUID != 0 )); then', 'if false; then')
+            script = script.replace('|| ! -b "$DISK"', '')
+            script = script.replace('[[ -b "$PART" ]]', 'true')
+            script = script.replace('PERSIST_MNT=$(mktemp -d)', f'PERSIST_MNT="{persist_dir}"')
+            test_script = work / 'shrink.sh'
+            test_script.write_text(script)
+            test_script.chmod(0o755)
+            env = dict(os.environ, PATH=str(commands) + os.pathsep + os.environ['PATH'])
+            result = subprocess.run(['bash', str(test_script), '/dev/nvme0n1', '200'],
+                                    cwd=work, env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            calls = log.read_text()
+            self.assertLess(calls.index('umount '), calls.index('e2fsck '))
+            self.assertIn('sgdisk --backup=', calls)
+            self.assertTrue((persist_dir / '.googlebook-gpt-backup/userdata-original.txt').is_file())
+            self.assertIn('resize2fs /dev/null_p1 199G', calls)
+            self.assertIn('sgdisk --delete=1 --new=1:39845888:+200G', calls)
+
 
 if __name__ == '__main__':
     unittest.main()

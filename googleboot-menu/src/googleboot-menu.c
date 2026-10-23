@@ -1106,14 +1106,14 @@ static int gpt_switch_slot(const char *disk_path, const char *mode, bool do_rebo
     bool write_changes = false;
     if (strcmp(mode, "a") == 0 || strcmp(mode, "android") == 0) {
         attr_a = 0x0102000000000000ULL;
-        attr_b = 0x0001000000000000ULL;
+        attr_b = 0x0101000000000000ULL;
         write_changes = true;
     } else if (strcmp(mode, "android-once") == 0 || strcmp(mode, "oneshot-a") == 0) {
         attr_a = 0x001f000000000000ULL; /* Priority=15, Tries=1, Successful=0 */
         attr_b = 0x010e000000000000ULL; /* Priority=14, Tries=0, Successful=1 */
         write_changes = true;
     } else if (strcmp(mode, "b") == 0 || strcmp(mode, "linux") == 0 || strcmp(mode, "fedomakase") == 0) {
-        attr_a = 0x0001000000000000ULL;
+        attr_a = 0x0101000000000000ULL;
         attr_b = 0x0102000000000000ULL;
         write_changes = true;
     } else if (strcmp(mode, "status") != 0) {

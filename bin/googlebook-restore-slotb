@@ -1,14 +1,23 @@
 #!/bin/sh
-# Restore an existing Linux Slot B from backup. Never rewrites Slot A images or super.
-# Usage: googlebook-restore-slotb [--fastboot [serial|tcp:IP] | --adb [serial]] [backup-dir] [--reboot]
-# With no transport flag, run as root in Linux with /boot mounted.
-# Android OTA promotion is unsupported; unknown/Android Slot B contents are refused.
+# googlebook-restore-slotb
+# Restore Linux Slot B from backup, with verified post-OTA promotion (Slot B -> Slot A).
+#
+# Usage:
+#   From Linux (as root, with /boot mounted):
+#     sudo googlebook-restore-slotb [backup-dir] [--no-promote] [--reboot]
+#   From host over TCP/USB Fastboot:
+#     ./bin/googlebook-restore-slotb --fastboot [tcp:IP|serial] [backup-dir] [--no-promote] [--reboot]
+#   From host over ADB (while booted into Googlebook OS; auto-transitions to TCP Fastboot):
+#     ./bin/googlebook-restore-slotb --adb [serial|IP:port] [backup-dir] [--no-promote] [--reboot]
 set -eu
 
 MODE=local
 TARGET=""
 BACKUP_DIR=""
+PROMOTE_OTA=1
+AUTO_POST_OTA=0
 DO_REBOOT=0
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --fastboot|--adb)
@@ -16,21 +25,25 @@ while [ $# -gt 0 ]; do
       if [ $# -gt 0 ] && [ "${1#-}" = "$1" ] && [ ! -d "$1" ]; then
         TARGET=$1; shift
       fi ;;
+    --no-promote) PROMOTE_OTA=0; shift ;;
+    --promote-ota) PROMOTE_OTA=1; shift ;;
+    --auto-post-ota) AUTO_POST_OTA=1; PROMOTE_OTA=1; shift ;;
     --reboot|-r) DO_REBOOT=1; shift ;;
-    --no-promote) shift ;; # Compatibility only; never bypasses validation.
-    --install-hook) echo 'Automatic OTA recovery is disabled; no hook installed.' >&2; exit 1 ;;
-    -h|--help) sed -n '2,5s/^# //p' "$0"; exit 0 ;;
+    --install-hook) echo 'Automatic Android root hook is disabled; use --adb or --fastboot.' >&2; exit 1 ;;
+    -h|--help) sed -n '2,11s/^# \{0,1\}//p' "$0"; exit 0 ;;
     *) [ -d "$1" ] && [ -z "$BACKUP_DIR" ] || { echo "Invalid argument: $1" >&2; exit 1; }
        BACKUP_DIR=$1; shift ;;
   esac
 done
 
-# Check the actual bootconfig offset, never an arbitrary prefix of the partition.
+log() { echo "[restore-slotb] $*"; }
+
+# Validate backup directory or classify an on-device Slot B using exact v4 header offsets.
 validate() {
   python3 - "$@" <<'PY'
-import os, re, struct, sys
+import hashlib, os, re, struct, sys
 
-def vendor(path):
+def parse_vendor(path):
     with open(path, 'rb') as f:
         h = f.read(2128)
         if len(h) != 2128 or h[:8] != b'VNDRBOOT':
@@ -41,108 +54,418 @@ def vendor(path):
             raise ValueError('unsupported vendor boot layout')
         align = lambda n: (n + page - 1) // page * page
         table, count, entry, size = (u32(n) for n in (2112, 2116, 2120, 2124))
-        if entry != 108 or table != count * entry or not 0 < size <= 65536:
-            raise ValueError('invalid vendor ramdisk table or bootconfig size')
+        if entry != 108 or table != count * entry:
+            raise ValueError('invalid vendor ramdisk table')
         offset = sum(align(n) for n in (2128, u32(24), u32(2100), table))
         if offset + size > 32 * 1024 * 1024:
             raise ValueError('bootconfig exceeds vendor partition')
-        f.seek(offset)
-        config = f.read(size)
-        if len(config) != size or not re.search(rb'(?m)^androidboot\.(?:googleboot|fedomakase)=1\r?$', config):
-            raise ValueError('Slot B is not positively identified as Linux; OTA recovery is unsupported')
+        config = b''
+        if size > 0:
+            if size > 65536:
+                raise ValueError('invalid bootconfig size')
+            f.seek(offset)
+            config = f.read(size)
+            if len(config) != size:
+                raise ValueError('truncated vendor bootconfig')
+        is_linux = bool(re.search(rb'(?m)^androidboot\.(?:googleboot|fedomakase)=1\r?$', config))
+        return is_linux, offset + align(size), offset, size, hashlib.sha256(config).hexdigest()
 
-def boot(path, limit, kernel):
-    size = os.path.getsize(path)
+def copy_exact(src, dst, count):
+    with open(src, 'rb') as fsrc, open(dst, 'wb') as fdst:
+        rem = count
+        while rem > 0:
+            chunk = fsrc.read(min(1048576, rem))
+            if not chunk:
+                raise ValueError('unexpected EOF reading ' + src)
+            fdst.write(chunk)
+            rem -= len(chunk)
+        fdst.flush()
+        os.fsync(fdst.fileno())
+
+def parse_boot(path, limit, kernel, check_file_size=True):
     with open(path, 'rb') as f:
         h = f.read(1584)
-    if len(h) != 1584 or h[:8] != b'ANDROID!' or not 4096 <= size <= limit:
-        raise ValueError('invalid boot image size or magic')
+    if len(h) != 1584 or h[:8] != b'ANDROID!':
+        raise ValueError('invalid boot image magic')
     k, r = struct.unpack_from('<II', h, 8)
     if struct.unpack_from('<I', h, 20)[0] != 1584 or struct.unpack_from('<I', h, 40)[0] != 4:
         raise ValueError('expected Android boot image v4')
     if (kernel and not k) or (not kernel and (k or not r)):
         raise ValueError('wrong kernel/ramdisk image role')
     needed = 4096 + ((k + 4095) // 4096 + (r + 4095) // 4096) * 4096
-    if size < needed:
-        raise ValueError('truncated boot image')
+    if needed > limit:
+        raise ValueError('boot image exceeds partition limit')
+    if check_file_size:
+        size = os.path.getsize(path)
+        if not 4096 <= size <= limit or size < needed:
+            raise ValueError('invalid or truncated boot image size')
+    return needed
 
+mode = sys.argv[1]
 try:
-    if sys.argv[1] == 'vendor':
-        vendor(sys.argv[2])
-    else:
+    if mode == 'backup':
         directory = sys.argv[2]
-        boot(os.path.join(directory, 'boot_b.img'), 64 * 1024 * 1024, True)
-        boot(os.path.join(directory, 'init_boot_b.img'), 8 * 1024 * 1024, False)
-        path = os.path.join(directory, 'vendor_boot_b.img')
-        if not 2128 <= os.path.getsize(path) <= 32 * 1024 * 1024:
+        parse_boot(os.path.join(directory, 'boot_b.img'), 64 * 1024 * 1024, True, True)
+        parse_boot(os.path.join(directory, 'init_boot_b.img'), 8 * 1024 * 1024, False, True)
+        vpath = os.path.join(directory, 'vendor_boot_b.img')
+        if not 2128 <= os.path.getsize(vpath) <= 32 * 1024 * 1024:
             raise ValueError('invalid vendor image size')
-        vendor(path)
+        is_linux, _, bc_off, bc_len, bc_sha = parse_vendor(vpath)
+        if not is_linux:
+            raise ValueError('backup vendor_boot_b.img is missing Linux bootconfig marker')
+        print(f"{bc_off} {bc_len} {bc_sha}")
+    elif mode == 'classify-slot':
+        boot_dev, init_dev, vend_dev = sys.argv[2], sys.argv[3], sys.argv[4]
+        try:
+            is_linux, _, _, _, _ = parse_vendor(vend_dev)
+            if is_linux:
+                parse_boot(boot_dev, 64 * 1024 * 1024, True, False)
+                parse_boot(init_dev, 8 * 1024 * 1024, False, False)
+                print('linux')
+                sys.exit(0)
+        except Exception:
+            pass
+        try:
+            with open(vend_dev, 'rb') as f:
+                vh = f.read(8)
+            if vh == b'VNDRBOOT':
+                parse_boot(boot_dev, 64 * 1024 * 1024, True, False)
+                parse_boot(init_dev, 8 * 1024 * 1024, False, False)
+                print('android')
+            else:
+                print('other')
+        except Exception:
+            print('other')
+    elif mode == 'extract-slot':
+        boot_dev, init_dev, vend_dev, out_dir = sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+        b_sz = parse_boot(boot_dev, 64 * 1024 * 1024, True, False)
+        i_sz = parse_boot(init_dev, 8 * 1024 * 1024, False, False)
+        is_linux, v_sz, _, _, _ = parse_vendor(vend_dev)
+        if not is_linux:
+            raise ValueError('source slot is not a Linux vendor_boot image')
+        os.makedirs(out_dir, exist_ok=True)
+        copy_exact(boot_dev, os.path.join(out_dir, 'boot_b.img'), b_sz)
+        copy_exact(init_dev, os.path.join(out_dir, 'init_boot_b.img'), i_sz)
+        copy_exact(vend_dev, os.path.join(out_dir, 'vendor_boot_b.img'), v_sz)
 except (OSError, ValueError, struct.error) as e:
     sys.exit('Refusing restore: ' + str(e))
 PY
 }
 
+# Promote super (p3) LpMetadata Slot 1 (_b) -> Slot 0 (_a) after Virtual A/B merge.
+promote_lp_metadata_file() {
+  python3 - "$1" <<'PY'
+import sys, struct, hashlib
+
+path = sys.argv[1]
+with open(path, "r+b") as f:
+    f.seek(4096)
+    geom = f.read(4096)
+    magic, struct_size, sha, max_size, slot_count, block_size = struct.unpack("<II32sIII", geom[:52])
+    if magic != 0x616c4467:
+        sys.exit(0)
+    base_pri = 12288
+    base_bak = 12288 + max_size * slot_count
+    off1 = base_pri + max_size * 1
+    f.seek(off1)
+    hdr1 = bytearray(f.read(256))
+    h_magic, major, minor, h_size = struct.unpack("<IHHI", hdr1[:12])
+    if h_magic != 0x414c5030:
+        sys.exit(0)
+    tables_size = struct.unpack("<I", hdr1[44:48])[0]
+    parts_off, parts_num, parts_es = struct.unpack("<III", hdr1[80:92])
+    exts_off, exts_num, exts_es = struct.unpack("<III", hdr1[92:104])
+    groups_off, groups_num, groups_es = struct.unpack("<III", hdr1[104:116])
+    f.seek(off1 + h_size)
+    tables1 = bytearray(f.read(tables_size))
+
+    b_exts = 0
+    for i in range(parts_num):
+        po = parts_off + i * parts_es
+        name = tables1[po:po+36].split(b"\x00")[0].decode("ascii", "replace")
+        _, _, n_ext, _ = struct.unpack("<IIII", tables1[po+36:po+52])
+        if name.endswith("_b") and n_ext > 0:
+            b_exts += n_ext
+
+    if b_exts > 0:
+        print(f"[restore-slotb] Promoting super LpMetadata Slot 1 (_b) -> Slot 0 (_a) ({b_exts} extents)...")
+        hdr0 = bytearray(hdr1)
+        tables0 = bytearray(tables1)
+        for i in range(parts_num):
+            po = parts_off + i * parts_es
+            name = tables0[po:po+36].split(b"\x00")[0].decode("ascii", "replace")
+            if name.endswith("_b"):
+                new_name = name[:-2] + "_a"
+            elif name.endswith("_b-cow"):
+                new_name = name[:-6] + "_a-cow"
+            elif name.endswith("_a"):
+                new_name = name[:-2] + "_b"
+            elif name.endswith("_a-cow"):
+                new_name = name[:-6] + "_b-cow"
+            else:
+                continue
+            tables0[po:po+36] = new_name.encode("ascii").ljust(36, b"\x00")
+        for i in range(groups_num):
+            go = groups_off + i * groups_es
+            gname = tables0[go:go+36].split(b"\x00")[0].decode("ascii", "replace")
+            if gname.endswith("_b"):
+                new_gname = gname[:-2] + "_a"
+            elif gname.endswith("_a"):
+                new_gname = gname[:-2] + "_b"
+            else:
+                continue
+            tables0[go:go+36] = new_gname.encode("ascii").ljust(36, b"\x00")
+
+        hdr0[48:80] = hashlib.sha256(tables0).digest()
+        hdr0[12:44] = b"\x00" * 32
+        hdr0[12:44] = hashlib.sha256(hdr0[:h_size]).digest()
+
+        for base in (base_pri, base_bak):
+            f.seek(base)
+            f.write(hdr0[:h_size])
+            f.write(tables0)
+        f.flush()
+PY
+}
+
 command -v python3 >/dev/null || { echo 'Python 3 is required before any restore.' >&2; exit 1; }
-[ -n "$BACKUP_DIR" ] || { if [ "$MODE" = local ]; then BACKUP_DIR=/boot/slotb-backup; else BACKUP_DIR=./slotb-backup; fi; }
-validate backup "$BACKUP_DIR"
+if [ "$MODE" != local ]; then
+  [ -n "$BACKUP_DIR" ] || BACKUP_DIR=./slotb-backup
+  BC_INFO=$(validate backup "$BACKUP_DIR")
+  set -- $BC_INFO
+  BC_OFF=$1
+  BC_LEN=$2
+  BC_SHA=$3
+fi
 
 if [ "$MODE" = adb ]; then
   adb_cmd() { if [ -n "$TARGET" ]; then adb -s "$TARGET" "$@"; else adb "$@"; fi; }
-  SERIAL=$(adb_cmd shell getprop ro.serialno | tr -d '\r\n')
-  case "$SERIAL" in ''|*[!a-zA-Z0-9._-]*) echo 'Cannot determine a unique USB Fastboot serial; use --fastboot explicitly.' >&2; exit 1 ;; esac
+  log "Querying Googlebook via ADB..."
+  LAN_IP=$(adb_cmd shell "ip -4 -o addr show scope global 2>/dev/null | awk '\$2 ~ /^(eth|en)/ {split(\$4,a,\"/\"); print a[1]; found=1; exit} !ip {split(\$4,b,\"/\"); ip=b[1]} END {if (!found && ip) print ip}'" 2>/dev/null | tr -d '\r\n ')
+  SERIAL=$(adb_cmd shell getprop ro.serialno 2>/dev/null | tr -d '\r\n ')
+  log "Rebooting Googlebook into Fastboot mode..."
   adb_cmd reboot bootloader
-  TARGET=$SERIAL
+  if [ -n "$LAN_IP" ]; then
+    log "Waiting for TCP Fastboot at ${LAN_IP}:5554..."
+    python3 - "$LAN_IP" <<'PY_WAIT'
+import socket, sys, time
+ip = sys.argv[1]
+for _ in range(40):
+    s = socket.socket()
+    s.settimeout(0.5)
+    try:
+        s.connect((ip, 5554))
+        s.close()
+        sys.exit(0)
+    except Exception:
+        s.close()
+        time.sleep(0.5)
+sys.exit(1)
+PY_WAIT
+    TARGET="tcp:$LAN_IP"
+  else
+    case "$SERIAL" in ''|*[!a-zA-Z0-9._-]*) echo 'Cannot determine Googlebook LAN IP or USB Fastboot serial; use --fastboot tcp:<IP>.' >&2; exit 1 ;; esac
+    TARGET=$SERIAL
+  fi
   MODE=fastboot
 fi
 
 if [ "$MODE" = fastboot ]; then
   fb() { if [ -n "$TARGET" ]; then fastboot -s "$TARGET" "$@"; else fastboot "$@"; fi; }
-  WORK=$(mktemp -d)
-  trap 'rm -rf "$WORK"' EXIT
-  # A/B selection says nothing about the OS; require a readable Linux vendor image.
-  if ! fb fetch vendor_boot_b "$WORK/vendor_boot_b.img"; then
-    echo 'Cannot verify Slot B. This device must support Fastboot fetch; no partitions flashed.' >&2
-    exit 1
+  # current-slot may fail on Depthcharge if both slots currently have priority 0
+  CUR_SLOT=$(fb getvar current-slot 2>&1 | sed -n 's/.*current-slot: *\([ab]\).*/\1/p' | head -n1 || true)
+  SLOT_B_OK=$(fb getvar slot-successful:b 2>&1 | sed -n 's/.*slot-successful:b: *\([a-z]*\).*/\1/p' | head -n1 || true)
+
+  FLASH_SLOT="b"
+  if [ "$PROMOTE_OTA" = "1" ] && [ "$SLOT_B_OK" = "yes" ]; then
+    DEV_BC_SHA=$(fb oem "sha256:vendor_boot_b:${BC_OFF}:${BC_LEN}" 2>&1 | sed -n 's/.*(bootloader) *\([0-9a-fA-F]\{64\}\).*/\1/p' | tr 'A-F' 'a-f' | head -n1 || true)
+    if [ -n "$DEV_BC_SHA" ] && [ "$DEV_BC_SHA" = "$BC_SHA" ]; then
+      log "Verified via oem sha256 that Slot B already contains Linux; flashing Slot B directly..."
+    elif [ "$CUR_SLOT" = "b" ] || [ -n "$DEV_BC_SHA" ]; then
+      FLASH_SLOT="a"
+      log "Detected unpromoted Android OTA in Slot B (slot-successful:b=yes)."
+      log "Staging Linux into Slot A so Linux promotes Android OTA (Slot B -> Slot A) on boot..."
+    fi
   fi
-  validate vendor "$WORK/vendor_boot_b.img"
-  for name in boot_b init_boot_b vendor_boot_b; do
-    info=$(fb getvar "partition-size:$name" 2>&1)
-    capacity=$(printf '%s\n' "$info" | sed -n "s/.*partition-size:$name: *\(0x[0-9a-fA-F]*\).*/\1/p")
-    python3 - "$capacity" "$BACKUP_DIR/$name.img" <<'PY_SIZE'
+  if [ "$FLASH_SLOT" = "b" ]; then
+    log "Flashing Linux directly to Slot B via Fastboot ${TARGET:+($TARGET)}..."
+  fi
+
+  for role in boot init_boot vendor_boot; do
+    part="${role}_${FLASH_SLOT}"
+    img="$BACKUP_DIR/${role}_b.img"
+    info=$(fb getvar "partition-size:$part" 2>&1 || true)
+    capacity=$(printf '%s\n' "$info" | sed -n "s/.*partition-size:$part: *\(0x[0-9a-fA-F]*\).*/\1/p" | head -n1)
+    if [ -n "$capacity" ]; then
+      python3 - "$capacity" "$img" <<'PY_SIZE'
 import os, sys
-try:
-    if os.path.getsize(sys.argv[2]) > int(sys.argv[1], 16):
-        raise ValueError('image exceeds partition')
-except ValueError as e:
-    sys.exit('Invalid partition size: ' + str(e))
+if os.path.getsize(sys.argv[2]) > int(sys.argv[1], 16):
+    sys.exit('Refusing restore: image exceeds partition ' + sys.argv[1])
 PY_SIZE
+    fi
   done
-  for name in boot_b init_boot_b vendor_boot_b; do
-    fb flash "$name" "$BACKUP_DIR/$name.img"
+
+  for role in boot init_boot vendor_boot; do
+    fb flash "${role}_${FLASH_SLOT}" "$BACKUP_DIR/${role}_b.img"
   done
-  fb --set-active=b
+  fb --set-active="$FLASH_SLOT"
   if [ "$DO_REBOOT" = 1 ]; then fb reboot; fi
-else
-  [ "$(id -u)" = 0 ] || { echo 'Run with sudo from Linux.' >&2; exit 1; }
-  command -v sgdisk >/dev/null || { echo 'sgdisk is required before restoring.' >&2; exit 1; }
-  for pair in 14:boot_b 19:init_boot_b 21:vendor_boot_b 15:vbmeta_a 16:vbmeta_b 13:boot_a; do
-    dev="/dev/nvme0n1p${pair%%:*}"
-    [ -b "$dev" ] && [ "$(lsblk -dnro PARTLABEL "$dev")" = "${pair#*:}" ] || {
-      echo "Unexpected partition layout at $dev; refusing restore." >&2; exit 1;
-    }
-  done
-  validate vendor /dev/nvme0n1p21
-  for pair in 14:boot_b 19:init_boot_b 21:vendor_boot_b; do
-    size=$(wc -c < "$BACKUP_DIR/${pair#*:}.img")
-    [ "$size" -le "$(blockdev --getsize64 "/dev/nvme0n1p${pair%%:*}")" ] || {
-      echo 'Backup exceeds target partition; no images written.' >&2; exit 1;
-    }
-  done
-  for pair in 14:boot_b 19:init_boot_b 21:vendor_boot_b; do
-    dd if="$BACKUP_DIR/${pair#*:}.img" of="/dev/nvme0n1p${pair%%:*}" bs=1048576 conv=fsync
-  done
-  sgdisk --attributes=15:=0001000000000000 --attributes=16:=0102000000000000 \
-         --attributes=13:=0001000000000000 --attributes=14:=0102000000000000 /dev/nvme0n1
-  if [ "$DO_REBOOT" = 1 ]; then reboot; fi
+  if [ "$FLASH_SLOT" = "a" ]; then
+    log "Linux staged in Slot A. On boot, Linux will promote the Android OTA (Slot B -> Slot A) and restore Linux to Slot B."
+  else
+    log "Linux Slot B restored."
+  fi
+  exit 0
 fi
-echo 'Linux Slot B restored. Slot A, super and vbmeta image contents were not rewritten.'
+
+# On-device Linux root mode
+export PATH="${PATH:+$PATH:}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+[ "$(id -u)" = 0 ] || { echo 'Run with sudo from Linux.' >&2; exit 1; }
+
+for pair in \
+  3:super 9:ota_recovery_a 10:ota_recovery_b \
+  13:boot_a 14:boot_b 15:vbmeta_a 16:vbmeta_b \
+  18:init_boot_a 19:init_boot_b 20:vendor_boot_a 21:vendor_boot_b \
+  22:pvmfw_a 23:pvmfw_b 27:recovery_a 28:recovery_b; do
+  dev="/dev/nvme0n1p${pair%%:*}"
+  partlabel=$(lsblk -dnro PARTLABEL "$dev" 2>/dev/null || true)
+  [ -n "$partlabel" ] || partlabel=$(sed -n 's/^PARTNAME=//p' "/sys/class/block/${dev##*/}/uevent" 2>/dev/null || true)
+  [ -b "$dev" ] && [ "$partlabel" = "${pair#*:}" ] || {
+    echo "Unexpected partition layout at $dev; refusing restore." >&2; exit 1;
+  }
+done
+
+if [ ! -d /boot/slotb-backup ] && [ -b /dev/nvme0n1p11 ]; then
+  mkdir -p /boot 2>/dev/null || true
+  mount /dev/nvme0n1p11 /boot 2>/dev/null || true
+fi
+
+SLOTB_KIND=$(validate classify-slot /dev/nvme0n1p14 /dev/nvme0n1p19 /dev/nvme0n1p21)
+SLOTA_KIND=$(validate classify-slot /dev/nvme0n1p13 /dev/nvme0n1p18 /dev/nvme0n1p20)
+
+if [ "$SLOTB_KIND" != "android" ] && [ "$SLOTA_KIND" = "linux" ] &&
+   [ -f /boot/slotb-backup/android-stock/boot_a.img ] &&
+   [ -f /boot/slotb-backup/android-stock/init_boot_a.img ] &&
+   [ -f /boot/slotb-backup/android-stock/vendor_boot_a.img ]; then
+  log "Restoring stock Googlebook OS (Android) to Slot A from /boot/slotb-backup/android-stock..."
+  dd if=/boot/slotb-backup/android-stock/boot_a.img of=/dev/nvme0n1p13 bs=1048576 conv=fsync status=none
+  dd if=/boot/slotb-backup/android-stock/init_boot_a.img of=/dev/nvme0n1p18 bs=1048576 conv=fsync status=none
+  dd if=/boot/slotb-backup/android-stock/vendor_boot_a.img of=/dev/nvme0n1p20 bs=1048576 conv=fsync status=none
+  if [ -f /boot/slotb-backup/android-stock/vbmeta_a.img ]; then
+    dd if=/boot/slotb-backup/android-stock/vbmeta_a.img of=/dev/nvme0n1p15 bs=65536 conv=fsync status=none
+  fi
+  sync
+  SLOTA_KIND="android"
+fi
+
+if [ "$AUTO_POST_OTA" = "1" ] && [ "$SLOTB_KIND" != "android" ]; then
+  exit 0
+fi
+
+STAGED_TMP=""
+if [ -z "$BACKUP_DIR" ]; then
+  if [ "$SLOTA_KIND" = "linux" ]; then
+    STAGED_TMP="/run/googlebook-slotb-staged"
+    log "Extracting staged Linux images from Slot A into $STAGED_TMP..."
+    validate extract-slot /dev/nvme0n1p13 /dev/nvme0n1p18 /dev/nvme0n1p20 "$STAGED_TMP"
+    BACKUP_DIR="$STAGED_TMP"
+  else
+    BACKUP_DIR=/boot/slotb-backup
+  fi
+fi
+validate backup "$BACKUP_DIR" >/dev/null
+
+for pair in 14:boot_b 19:init_boot_b 21:vendor_boot_b; do
+  dev="/dev/nvme0n1p${pair%%:*}"
+  size=$(wc -c < "$BACKUP_DIR/${pair#*:}.img")
+  cap=$(blockdev --getsize64 "$dev" 2>/dev/null || true)
+  [ -n "$cap" ] || cap=$(( $(cat "/sys/class/block/${dev##*/}/size") * 512 ))
+  [ "$size" -le "$cap" ] || {
+    echo 'Backup exceeds target partition; no images written.' >&2; exit 1;
+  }
+done
+
+if [ "$SLOTB_KIND" = "android" ] && [ "$PROMOTE_OTA" = "1" ]; then
+  log "Verified Android OTA in Slot B; promoting updated Googlebook OS from Slot B -> Slot A..."
+  for pair in \
+    "14:13:boot" \
+    "19:18:init_boot" \
+    "21:20:vendor_boot" \
+    "16:15:vbmeta" \
+    "23:22:pvmfw" \
+    "28:27:recovery" \
+    "10:9:ota_recovery"; do
+    src_n="${pair%%:*}"
+    rest="${pair#*:}"
+    dst_n="${rest%%:*}"
+    name="${rest#*:}"
+    log "  copying ${name}_b (p${src_n}) -> ${name}_a (p${dst_n})"
+    dd if="/dev/nvme0n1p${src_n}" of="/dev/nvme0n1p${dst_n}" bs=1048576 conv=fsync status=none
+  done
+  promote_lp_metadata_file /dev/nvme0n1p3
+  if [ -d /boot/slotb-backup ]; then
+    mkdir -p /boot/slotb-backup/android-stock 2>/dev/null || true
+    dd if=/dev/nvme0n1p13 of=/boot/slotb-backup/android-stock/boot_a.img bs=1048576 conv=fsync status=none 2>/dev/null || true
+    dd if=/dev/nvme0n1p18 of=/boot/slotb-backup/android-stock/init_boot_a.img bs=1048576 conv=fsync status=none 2>/dev/null || true
+    dd if=/dev/nvme0n1p20 of=/boot/slotb-backup/android-stock/vendor_boot_a.img bs=1048576 conv=fsync status=none 2>/dev/null || true
+    dd if=/dev/nvme0n1p15 of=/boot/slotb-backup/android-stock/vbmeta_a.img bs=65536 conv=fsync status=none 2>/dev/null || true
+  fi
+fi
+
+for pair in 14:boot_b 19:init_boot_b 21:vendor_boot_b; do
+  dd if="$BACKUP_DIR/${pair#*:}.img" of="/dev/nvme0n1p${pair%%:*}" bs=1048576 conv=fsync status=none
+done
+if [ -n "$STAGED_TMP" ]; then
+  if mountpoint -q /boot 2>/dev/null; then
+    mkdir -p /boot/slotb-backup 2>/dev/null || true
+    cp -f "$STAGED_TMP"/boot_b.img "$STAGED_TMP"/init_boot_b.img "$STAGED_TMP"/vendor_boot_b.img /boot/slotb-backup/ 2>/dev/null || true
+  fi
+  rm -rf "$STAGED_TMP"
+fi
+sync
+
+# Set Slot B active (priority=2, successful=1) and Slot A as valid fallback (priority=1, successful=1)
+if command -v sgdisk >/dev/null 2>&1; then
+  sgdisk --attributes=15:=0101000000000000 --attributes=16:=0102000000000000 \
+         --attributes=13:=0101000000000000 --attributes=14:=0102000000000000 /dev/nvme0n1 >/dev/null
+elif [ -x /usr/local/bin/googleboot-menu ]; then
+  /usr/local/bin/googleboot-menu --switch-slot b --disk /dev/nvme0n1 >/dev/null
+else
+  python3 - /dev/nvme0n1 <<'PY_GPT'
+import os, struct, sys, zlib
+disk = sys.argv[1]
+with open(disk, 'r+b') as f:
+    for lba in (512, 4096):
+        f.seek(lba)
+        hdr = bytearray(f.read(lba))
+        if hdr[:8] == b'EFI PART':
+            break
+    else:
+        sys.exit('No GPT header found on ' + disk)
+    h_sz, _, _, cur_lba, bak_lba, _, _, _, pe_lba, num_pe, sz_pe, _ = struct.unpack_from('<IIIQQQQ16sQIII', hdr, 12)
+    f.seek(pe_lba * lba)
+    entries = bytearray(f.read(num_pe * sz_pe))
+    for idx, attr in ((12, 0x0101000000000000), (13, 0x0102000000000000),
+                      (14, 0x0101000000000000), (15, 0x0102000000000000)):
+        struct.pack_into('<Q', entries, idx * sz_pe + 48, attr)
+    pe_crc = zlib.crc32(entries) & 0xffffffff
+    struct.pack_into('<I', hdr, 88, pe_crc)
+    struct.pack_into('<I', hdr, 16, 0)
+    struct.pack_into('<I', hdr, 16, zlib.crc32(hdr[:h_sz]) & 0xffffffff)
+    f.seek(pe_lba * lba); f.write(entries)
+    f.seek(cur_lba * lba); f.write(hdr)
+    f.seek(bak_lba * lba)
+    bhdr = bytearray(f.read(lba))
+    if bhdr[:8] == b'EFI PART':
+        b_pe_lba = struct.unpack_from('<Q', bhdr, 72)[0]
+        struct.pack_into('<I', bhdr, 88, pe_crc)
+        struct.pack_into('<I', bhdr, 16, 0)
+        struct.pack_into('<I', bhdr, 16, zlib.crc32(bhdr[:h_sz]) & 0xffffffff)
+        f.seek(b_pe_lba * lba); f.write(entries)
+        f.seek(bak_lba * lba); f.write(bhdr)
+    f.flush()
+    os.fsync(f.fileno())
+PY_GPT
+fi
+log "Linux Slot B restored and set active (Slot A marked as bootable fallback)."
+if [ "$DO_REBOOT" = 1 ]; then reboot; fi

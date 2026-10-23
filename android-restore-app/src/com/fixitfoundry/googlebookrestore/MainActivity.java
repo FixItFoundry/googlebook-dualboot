@@ -64,6 +64,8 @@ public class MainActivity extends Activity {
     private static final int FASTBOOT_SUBCLASS = 0x42;
     private static final int FASTBOOT_PROTOCOL = 0x03;
     private static final int GOOGLE_VID = 0x18D1;
+    private static final int PROLIFIC_VID = 0x067B;
+    private static final int PROLIFIC_H2H_PID = 0x27A7;
 
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private UsbManager usbManager;
@@ -73,6 +75,7 @@ public class MainActivity extends Activity {
     private EditText etTcpHost;
     private Uri backupTree;
     private Button btnChooseBackup;
+    private CheckBox cbPromoteOta;
     private CheckBox cbAutoReboot;
     private TextView tvLog;
     private ScrollView scrollLog;
@@ -118,8 +121,8 @@ public class MainActivity extends Activity {
         appendLog("Googlebook 14 (Moonstone) Ready.");
         String savedTree = getPreferences(MODE_PRIVATE).getString("backupTree", null);
         if (savedTree != null) backupTree = Uri.parse(savedTree);
-        appendLog("Choose a backup folder, or use bundled images. Only verified Linux Slot B can be restored.");
-        appendLog("Android OTA recovery is unsupported. Fastboot fetch support is required.");
+        appendLog("Choose a backup folder, or use bundled images.");
+        appendLog("Supports TCP Fastboot (port 5554) and Post-OTA Slot B -> Slot A promotion.");
     }
 
     @Override
@@ -207,8 +210,8 @@ public class MainActivity extends Activity {
         root.addView(navPill);
 
         etTcpHost = new EditText(this);
-        etTcpHost.setHint("TCP Fastboot IP:Port (e.g. 192.168.8.50:5554)");
-        etTcpHost.setText("192.168.8.50:5554");
+        etTcpHost.setHint("TCP Fastboot IP:Port (e.g. 192.168.8.219:5554)");
+        etTcpHost.setText("192.168.8.219:5554");
         etTcpHost.setTextColor(Color.WHITE);
         etTcpHost.setHintTextColor(Color.parseColor("#6E7681"));
         etTcpHost.setTextSize(13);
@@ -236,24 +239,10 @@ public class MainActivity extends Activity {
                 selectTransportMode(false);
             }
         });
-        selectTransportMode(true);
-
-        // Hero Headline ("Stay in the loop." style from googlebook.google)
-        TextView heroTitle = new TextView(this);
-        heroTitle.setText("Stay in control.");
-        heroTitle.setTextColor(Color.WHITE);
-        heroTitle.setTextSize(30);
-        heroTitle.setTypeface(googleSans);
-        heroTitle.setLetterSpacing(-0.03f);
-        heroTitle.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams heroLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT);
-        heroLp.topMargin = dp(16);
-        root.addView(heroTitle, heroLp);
+        selectTransportMode(false);
 
         TextView heroSub = new TextView(this);
-        heroSub.setText("Restore an existing Linux Slot B. Android OTA recovery is unsupported.");
+        heroSub.setText("Restore Linux Slot B & promote Googlebook OS OTA updates over TCP or USB-C.");
         heroSub.setTextColor(Color.parseColor("#9AA0A6"));
         heroSub.setTextSize(13);
         heroSub.setTypeface(googleSansRegular);
@@ -261,7 +250,7 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT);
-        subLp.topMargin = dp(4);
+        subLp.topMargin = dp(12);
         subLp.bottomMargin = dp(14);
         root.addView(heroSub, subLp);
 
@@ -338,6 +327,14 @@ public class MainActivity extends Activity {
             }
         });
         card.addView(btnChooseBackup);
+
+        cbPromoteOta = new CheckBox(this);
+        cbPromoteOta.setText("Post-OTA Safe Mode (stage via Slot A when Slot B has active OTA)");
+        cbPromoteOta.setTextColor(Color.parseColor("#E8EAED"));
+        cbPromoteOta.setTextSize(12.5f);
+        cbPromoteOta.setTypeface(googleSansRegular);
+        cbPromoteOta.setChecked(true);
+        card.addView(cbPromoteOta);
 
         cbAutoReboot = new CheckBox(this);
         cbAutoReboot.setText("Reboot Googlebook automatically when complete");
@@ -586,6 +583,7 @@ public class MainActivity extends Activity {
     private void runTask(final String action) {
         final boolean useUsb = useUsbMode;
         final String tcpTarget = etTcpHost.getText().toString().trim();
+        final boolean promoteOta = cbPromoteOta.isChecked();
         final boolean autoReboot = cbAutoReboot.isChecked();
 
         if (useUsb) {
@@ -614,13 +612,16 @@ public class MainActivity extends Activity {
                     } else {
                         transport = openTcpTransport(tcpTarget);
                     }
-                    String product = transport.getVar("product");
-                    String curSlot = normalizeSlot(transport.getVar("current-slot"));
-                    appendLog("[Fastboot] Connected! product=" + product + ", current-slot=" + curSlot);
+                    String product = tryGetVar(transport, "product");
+                    String curSlot = normalizeSlot(tryGetVar(transport, "current-slot"));
+                    String slotBOk = tryGetVar(transport, "slot-successful:b").trim().toLowerCase(Locale.US);
+                    appendLog("[Fastboot] Connected! product=" + product
+                            + ", current-slot=" + (curSlot.isEmpty() ? "none" : curSlot)
+                            + ", slot-successful:b=" + (slotBOk.isEmpty() ? "unknown" : slotBOk));
 
                     if ("check".equals(action)) {
-                        String unlocked = transport.getVar("unlocked");
-                        String maxDl = transport.getVar("max-download-size");
+                        String unlocked = tryGetVar(transport, "unlocked");
+                        String maxDl = tryGetVar(transport, "max-download-size");
                         appendLog("[Fastboot] unlocked=" + unlocked + ", max-download-size=" + maxDl);
                     } else if ("switch_b".equals(action)) {
                         appendLog("[Fastboot] Setting active boot slot to 'b'...");
@@ -631,7 +632,7 @@ public class MainActivity extends Activity {
                         }
                         appendLog("[DONE] Active slot set to B!");
                     } else if ("restore".equals(action)) {
-                        performSlotBRestore(transport, autoReboot);
+                        performSlotBRestore(transport, curSlot, slotBOk, promoteOta, autoReboot);
                     }
                 } catch (Exception e) {
                     appendLog("[ERROR] " + e.getMessage());
@@ -645,6 +646,14 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    private String tryGetVar(FastbootTransport fb, String name) {
+        try {
+            return fb.getVar(name).trim();
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
     private String normalizeSlot(String raw) {
         if (raw == null) return "";
         String s = raw.trim().toLowerCase(Locale.US);
@@ -652,24 +661,45 @@ public class MainActivity extends Activity {
         return s;
     }
 
-    private void performSlotBRestore(FastbootTransport fb, boolean autoReboot) throws Exception {
-        String[] partitions = {"boot_b", "init_boot_b", "vendor_boot_b"};
-        ImageSource[] images = new ImageSource[partitions.length];
-        for (int i = 0; i < partitions.length; i++) {
-            images[i] = resolveImage(partitions[i] + ".img");
+    private void performSlotBRestore(FastbootTransport fb, String curSlot, String slotBOk, boolean promoteOta, boolean autoReboot) throws Exception {
+        String[] roles = {"boot", "init_boot", "vendor_boot"};
+        ImageSource[] images = new ImageSource[roles.length];
+        for (int i = 0; i < roles.length; i++) {
+            String srcName = roles[i] + "_b.img";
+            images[i] = resolveImage(srcName);
             try (InputStream in = images[i].open()) {
-                BootImages.validate(partitions[i], in, images[i].size);
+                BootImages.validate(roles[i] + "_b", in, images[i].size);
             }
-            long capacity = Long.parseLong(fb.getVar("partition-size:" + partitions[i]).replaceFirst("^0[xX]", ""), 16);
-            if (images[i].size > capacity) throw new IOException("Image exceeds " + partitions[i]);
         }
-        long[] config = BootImages.vendorLocation(fb.fetch(0, 2128));
-        BootImages.requireLinux(fb.fetch(config[0], (int) config[1]));
-        appendLog("[Restore] Verified Linux in Slot B. Restoring its three boot images...");
-        for (int i = 0; i < partitions.length; i++) flashOne(fb, partitions[i], images[i]);
-        fb.sendCommand("set_active:b");
+        String targetSlot = "b";
+        if (promoteOta && "b".equals(curSlot) && "yes".equals(slotBOk)) {
+            targetSlot = "a";
+            appendLog("[OTA-Safe] Detected completed OTA in Slot B (current-slot=b, slot-successful:b=yes).");
+            appendLog("[OTA-Safe] Staging Linux into Slot A so Linux promotes Android OTA (Slot B -> Slot A) on boot...");
+        } else {
+            appendLog("[Restore] Flashing Linux images directly to Slot B...");
+        }
+        for (int i = 0; i < roles.length; i++) {
+            String part = roles[i] + "_" + targetSlot;
+            String rawCap = tryGetVar(fb, "partition-size:" + part).replaceFirst("^0[xX]", "");
+            if (!rawCap.isEmpty()) {
+                try {
+                    long capacity = Long.parseLong(rawCap, 16);
+                    if (images[i].size > capacity) throw new IOException("Image exceeds " + part);
+                } catch (NumberFormatException ignored) {
+                }
+            }
+        }
+        for (int i = 0; i < roles.length; i++) {
+            flashOne(fb, roles[i] + "_" + targetSlot, images[i]);
+        }
+        fb.sendCommand("set_active:" + targetSlot);
         if (autoReboot) fb.sendCommand("reboot");
-        appendLog("[SUCCESS] Linux Slot B restored. Slot A and Android metadata were not rewritten.");
+        if ("a".equals(targetSlot)) {
+            appendLog("[SUCCESS] Linux staged in Slot A! On boot, Linux will promote the Android OTA (Slot B -> Slot A) and restore Linux to Slot B.");
+        } else {
+            appendLog("[SUCCESS] Linux Slot B restored and set active!");
+        }
     }
 
     private void flashOne(FastbootTransport fb, String partition, ImageSource src) throws Exception {
@@ -778,7 +808,8 @@ public class MainActivity extends Activity {
                     return dev;
                 }
             }
-            if (dev.getVendorId() == GOOGLE_VID) {
+            if (dev.getVendorId() == GOOGLE_VID ||
+                    (dev.getVendorId() == PROLIFIC_VID && dev.getProductId() == PROLIFIC_H2H_PID)) {
                 return dev;
             }
         }
@@ -798,7 +829,8 @@ public class MainActivity extends Activity {
             if ((intf.getInterfaceClass() == FASTBOOT_CLASS &&
                     intf.getInterfaceSubclass() == FASTBOOT_SUBCLASS &&
                     intf.getInterfaceProtocol() == FASTBOOT_PROTOCOL) ||
-                    dev.getVendorId() == GOOGLE_VID) {
+                    dev.getVendorId() == GOOGLE_VID ||
+                    (dev.getVendorId() == PROLIFIC_VID && dev.getProductId() == PROLIFIC_H2H_PID)) {
                 UsbEndpoint in = null, out = null;
                 for (int e = 0; e < intf.getEndpointCount(); e++) {
                     UsbEndpoint ep = intf.getEndpoint(e);

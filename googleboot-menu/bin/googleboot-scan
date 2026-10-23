@@ -156,9 +156,30 @@ unlock_luks() {
   return $rc
 }
 
+heal_slot_a_if_both_linux() {
+  if [[ -b /dev/nvme0n1p20 && -b /dev/nvme0n1p21 ]] &&
+     grep -a -q -E "androidboot\.(googleboot|fedomakase)=1" /dev/nvme0n1p20 2>/dev/null &&
+     grep -a -q -E "androidboot\.(googleboot|fedomakase)=1" /dev/nvme0n1p21 2>/dev/null &&
+     [[ -f "$BOOT_MNT/slotb-backup/android-stock/boot_a.img" &&
+        -f "$BOOT_MNT/slotb-backup/android-stock/init_boot_a.img" &&
+        -f "$BOOT_MNT/slotb-backup/android-stock/vendor_boot_a.img" ]]; then
+    cat "$BOOT_MNT/slotb-backup/android-stock/boot_a.img" > /dev/nvme0n1p13 2>/dev/null || true
+    cat "$BOOT_MNT/slotb-backup/android-stock/init_boot_a.img" > /dev/nvme0n1p18 2>/dev/null || true
+    cat "$BOOT_MNT/slotb-backup/android-stock/vendor_boot_a.img" > /dev/nvme0n1p20 2>/dev/null || true
+    if [[ -f "$BOOT_MNT/slotb-backup/android-stock/vbmeta_a.img" ]]; then
+      cat "$BOOT_MNT/slotb-backup/android-stock/vbmeta_a.img" > /dev/nvme0n1p15 2>/dev/null || true
+    fi
+    sync
+    if [[ -x /usr/local/bin/googleboot-menu ]]; then
+      /usr/local/bin/googleboot-menu --switch-slot b --disk "$DISK" >/dev/null 2>&1 || true
+    fi
+  fi
+}
+
 scan_entries() {
   : > "$STATE_FILE" 2>/dev/null || true
   mount_boot_ro || true
+  heal_slot_a_if_both_linux
 
   local needs_luks=0
   if is_luks_part "$ROOT_PART"; then
@@ -294,6 +315,7 @@ run_sysroot_sync_now() {
 boot_entry() {
   local target_id="$1"
   mount_boot_ro || true
+  heal_slot_a_if_both_linux
 
   case "$target_id" in
     android)
@@ -352,6 +374,13 @@ boot_entry() {
             kexec -l "$fkernel" --initrd="$finitrd" --command-line="$fcmdline"
           else
             kexec -l "$fkernel" --command-line="$fcmdline"
+          fi
+          if [[ "$target_id" != usb:* ]]; then
+            umount "$BOOT_MNT" 2>/dev/null || true
+            udevadm settle --timeout=5 2>/dev/null || true
+            run_sysroot_sync_now
+            sync
+            umount /sysroot 2>/dev/null || true
           fi
           systemctl kexec 2>/dev/null || kexec -e
           exit 0

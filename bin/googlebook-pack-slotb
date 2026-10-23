@@ -215,6 +215,10 @@ for sync_script in \
     cp -f "$sync_script" "$W/unpacked/usr/bin/googlebook-sysroot-sync"
     cp -f "$sync_script" "$W/unpacked/usr/local/bin/googlebook-sysroot-sync"
     chmod 755 "$W/unpacked/usr/bin/googlebook-sysroot-sync" "$W/unpacked/usr/local/bin/googlebook-sysroot-sync"
+    if [[ -f "$SELF_DIR/bin/googlebook-restore-slotb" ]]; then
+      cp -f "$SELF_DIR/bin/googlebook-restore-slotb" "$W/unpacked/usr/local/bin/googlebook-restore-slotb"
+      chmod 755 "$W/unpacked/usr/local/bin/googlebook-restore-slotb"
+    fi
     cat > "$W/unpacked/etc/systemd/system/googlebook-sysroot-sync.service" << 'SYNCSVCEOF'
 [Unit]
 Description=GoogleBook Moonstone Sysroot Hardware & Module Sync

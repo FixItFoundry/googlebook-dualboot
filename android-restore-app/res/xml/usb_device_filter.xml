@@ -2,6 +2,8 @@
 <resources>
     <!-- Google Fastboot USB Interface (Class 0xFF, Subclass 0x42, Protocol 0x03) -->
     <usb-device class="255" subclass="66" protocol="3" />
-    <!-- Google Vendor ID 0x18d1 (6353) -->
+    <!-- Google Vendor ID 0x18d1 (6353) — includes 18d1:27a7, 18d1:5084, 18d1:506d..506f -->
     <usb-device vendor-id="6353" />
+    <!-- Prolific PL27A1/PL27A7 USB 3.0 Host-to-Host Bridge 0x067b:0x27a7 (1659:10151) -->
+    <usb-device vendor-id="1659" product-id="10151" />
 </resources>

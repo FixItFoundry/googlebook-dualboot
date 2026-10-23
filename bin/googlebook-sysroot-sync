@@ -72,6 +72,8 @@ XEEOF
 mkdir -p /sysroot/usr/local/bin /sysroot/usr/local/sbin /sysroot/etc/udev/rules.d /sysroot/etc/sudoers.d
 for bin_name in googlebook-switch-slot googleboot-menu googleboot-scan googlebook-restore-slotb; do
   if [ -f "/usr/local/bin/$bin_name" ]; then
+    # Absolute symlinks (e.g. to /usr/share/omarchy/bin) dangle in initramfs and make cp refuse.
+    rm -f "/sysroot/usr/local/bin/$bin_name"
     cp -f "/usr/local/bin/$bin_name" "/sysroot/usr/local/bin/$bin_name"
     chmod 755 "/sysroot/usr/local/bin/$bin_name"
   fi
@@ -147,9 +149,34 @@ if [ ! -e /dev/dri/renderD128 ]; then
   modprobe xe gsc_firmware_path="" huc_firmware_path="" wedged_mode=0 enable_psr=0 2>/dev/null || true
 fi
 
+# If Linux was staged into Slot A after an Android OTA, promote the verified Android OTA
+# from Slot B -> Slot A and restore Linux to Slot B automatically.
+if [ -f /usr/local/bin/googlebook-restore-slotb ]; then
+  if [ -d /boot/slotb-backup ]; then
+    cp -f /usr/local/bin/googlebook-restore-slotb /boot/slotb-backup/googlebook-restore-slotb 2>/dev/null || true
+    chmod 755 /boot/slotb-backup/googlebook-restore-slotb 2>/dev/null || true
+  fi
+  /bin/sh /usr/local/bin/googlebook-restore-slotb --auto-post-ota >>/run/googlebook-restore-slotb.log 2>&1 || true
+fi
+
 exit 0
 GPUEOF
 chmod 755 /sysroot/usr/local/sbin/googlebook-gpu-init
+chroot /sysroot chcon --reference=/usr/bin/sh /usr/local/bin/googlebook-switch-slot /usr/local/bin/googleboot-menu /usr/local/bin/googleboot-scan /usr/local/bin/googlebook-restore-slotb /usr/local/sbin/googlebook-gpu-init 2>/dev/null || true
+
+# Run post-OTA promotion (Slot B -> Slot A) immediately during initramfs sync if Linux is staged in Slot A
+if [ -f /sysroot/usr/local/bin/googlebook-restore-slotb ]; then
+  MOUNTED_DEV=0; MOUNTED_PROC=0; MOUNTED_SYS=0; MOUNTED_RUN=0
+  if [ ! -b /sysroot/dev/nvme0n1 ]; then mount --bind /dev /sysroot/dev 2>/dev/null && MOUNTED_DEV=1 || true; fi
+  if [ ! -e /sysroot/proc/mounts ]; then mount --bind /proc /sysroot/proc 2>/dev/null && MOUNTED_PROC=1 || true; fi
+  if [ ! -d /sysroot/sys/class/block ]; then mount --bind /sys /sysroot/sys 2>/dev/null && MOUNTED_SYS=1 || true; fi
+  if [ ! -d /sysroot/run/udev ]; then mount --bind /run /sysroot/run 2>/dev/null && MOUNTED_RUN=1 || true; fi
+  chroot /sysroot /bin/sh /usr/local/bin/googlebook-restore-slotb --auto-post-ota >>/run/googlebook-restore-slotb.log 2>&1 || true
+  [ "$MOUNTED_RUN" = 1 ] && umount /sysroot/run 2>/dev/null || true
+  [ "$MOUNTED_SYS" = 1 ] && umount /sysroot/sys 2>/dev/null || true
+  [ "$MOUNTED_PROC" = 1 ] && umount /sysroot/proc 2>/dev/null || true
+  [ "$MOUNTED_DEV" = 1 ] && umount /sysroot/dev 2>/dev/null || true
+fi
 
 cat > /sysroot/etc/systemd/system/googlebook-gpu-init.service << 'SVCEOF'
 [Unit]

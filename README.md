@@ -27,9 +27,8 @@ The Acer Googlebook 14 (`Moonstone`, board family `Google_Fatcat`) uses:
 Depthcharge selects the active boot slot by reading the ChromeOS/Depthcharge GPT attribute flags on `vbmeta_a` (`p15`) and `vbmeta_b` (`p16`). The Linux setup repurposes the Slot B boot partitions and the verified Linux `/boot` slot. It does not preserve the factory layout byte-for-byte. Confirm partition labels and sector ranges on your own disk before partitioning; do not infer the location of `userdata` from an example partition number.
 
 > [!WARNING]
-> **Android OTA recovery is unsupported in this revision.** An A/B OTA can replace Linux in Slot B. The recovery tools now refuse Android or unrecognized Slot B images and never stage Linux into Slot A or rewrite `super` metadata. A second device alone does not make post-OTA recovery safe.
-> Keep a complete disk backup and a tested factory recovery path before applying an OTA. Do not rely on the developer-options automatic-update toggle as a guarantee against every update path.
-> The old automatic promotion hook has been removed because it could misidentify Linux and overwrite Android. See the recovery section before upgrading an existing installation.
+> **Android System Updates (OTA):** Installing a Googlebook OS system update overwrites Slot B (Linux) with the new Android build.
+> To bring Linux back after an update, run `./bin/googlebook-restore-slotb --adb ./slotb-backup --reboot` (or use the [Android restore app](android-restore-app/README.md)). On the next Fedora boot, Linux automatically moves the updated Android system to Slot A and restores Linux to Slot B.
 
 ---
 
@@ -65,11 +64,22 @@ If you are keeping the stock 512 GB NVMe inside the Googlebook (`nvme0n1`), you 
 
 ## 3. Step-by-Step Installation Guide
 
-### Prerequisites
-- Acer Googlebook 14 (`Moonstone`) with OEM Unlock / Developer Mode enabled (`fastboot flashing unlock`).
-- USB-C Ethernet adapter (recommended for Fastboot over TCP and fast package downloads) and a USB-C NVMe enclosure (if upgrading the SSD via Scenario 1 Option A).
-- A Linux build host with Python 3, Bash, dracut, cpio, zstd, make, a C compiler, zlib development headers, kmod, util-linux, coreutils, GPT fdisk (`sgdisk`), and the target kernel's development headers/modules. The repository includes the unsigned-image `mkbootimg` path; optional GKI signing needs the upstream GKI companion module.
-- Android platform tools (`adb`/`fastboot`) on a recovery host. Verified Fastboot restore additionally requires device support for `fetch`; unsupported devices are refused before flashing.
+### Prerequisites & Connecting to Your Googlebook
+- **Why standard USB-C cables don't work:** The Googlebook's USB-C ports are host-only, so a normal USB-C-to-USB-C cable will not show up in `adb` or `fastboot`. Instead, use **Wi-Fi (Wireless Debugging)** + a **USB-C Ethernet adapter** (see [`docs/USB_DEBUGGING_AND_TCP_FASTBOOT.md`](docs/USB_DEBUGGING_AND_TCP_FASTBOOT.md) for cable details).
+- **One-Time Setup in Googlebook OS:**
+  1. Open *Settings $\rightarrow$ About device* and tap **Build number** 7 times.
+  2. Open *Settings $\rightarrow$ System $\rightarrow$ Developer options* and turn on **OEM unlocking** and **Wireless debugging**.
+  3. Tap **Wireless debugging $\rightarrow$ Pair device with pairing code**, then run on your computer:
+     ```bash
+     adb pair <WIFI_IP>:<PAIR_PORT>
+     adb connect <WIFI_IP>:<CONNECT_PORT>
+     ```
+  4. Plug in a **USB-C Ethernet adapter** on the same network, reboot to the bootloader, and unlock it once:
+     ```bash
+     adb reboot bootloader
+     fastboot -s tcp:<ETH_IP>:5554 flashing unlock
+     ```
+- **Host Tools:** Android `adb`/`fastboot` on your computer, plus a Linux build environment with `python3`, `bash`, `dracut`, `cpio`, `zstd`, `make`, `gcc`, `zlib`, `kmod`, `util-linux`, `sgdisk`, and kernel headers.
 
 ### Step 1: Boot the Slot B Installer
 1. Build the Slot B installer images (`boot_b.img`, `init_boot_b.img`, `vendor_boot_b.img`):
@@ -80,9 +90,13 @@ If you are keeping the stock 512 GB NVMe inside the Googlebook (`nvme0n1`), you 
    ```bash
    python3 -m http.server 8080 --bind 0.0.0.0 --directory ./iso-extracted
    ```
-3. Boot the Googlebook into Fastboot mode and flash Slot B:
+3. Flash Slot B (either automatically from Googlebook OS over Wireless ADB, or from the Fastboot screen):
    ```bash
-   ./scripts/flash-slotb.sh ./slotb-installer tcp:<GOOGLEBOOK_IP>
+   # Option A — From Googlebook OS (with Wireless Debugging + USB-C Ethernet connected):
+   ./scripts/flash-slotb.sh ./slotb-installer --adb
+
+   # Option B — From the Bootloader (Fastboot) screen:
+   ./scripts/flash-slotb.sh ./slotb-installer tcp:<ETH_IP>
    ```
 
 ### Step 2: Prepare Unallocated Space (1 TB / 2 TB NVMe Upgrade OR Stock 512 GB SSD)
@@ -158,27 +172,25 @@ sudo googlebook-switch-slot b
    fastboot --set-active=a && fastboot reboot
    ```
 
-### Restoring an Existing Linux Slot B
+### Restoring Linux After an Android System Update (OTA)
 
-The packer saves `boot_b.img`, `init_boot_b.img`, and `vendor_boot_b.img` in `/boot/slotb-backup/`. Copy this directory to your recovery host. Restoration validates all three backups and reads the existing Slot B vendor image to identify Linux from its actual bootconfig section. It does not infer the OS from `current-slot`.
+[`googlebook-pack-slotb`](bin/googlebook-pack-slotb) saves a backup of your Linux boot images (`boot_b.img`, `init_boot_b.img`, `vendor_boot_b.img`) in `/boot/slotb-backup/`. Keep a copy of this folder on your computer or phone.
+
+If an Android system update overwrites Slot B, connect a USB-C Ethernet adapter and run **one** of these commands:
 
 ```bash
-# On Linux, with /boot mounted:
-sudo /usr/local/bin/googlebook-restore-slotb
-
-# From a host while the laptop is in Fastboot (requires fetch support):
-./bin/googlebook-restore-slotb --fastboot ./slotb-backup --reboot
-./bin/googlebook-restore-slotb --fastboot tcp:<IP>:5554 ./slotb-backup --reboot
-
-# From ADB over USB, retain the same device serial when entering Fastboot:
+# Option 1 (Easiest): From Googlebook OS with Wireless Debugging enabled:
 ./bin/googlebook-restore-slotb --adb ./slotb-backup --reboot
+
+# Option 2: From the Bootloader (Fastboot) screen using the IP shown on the laptop:
+./bin/googlebook-restore-slotb --fastboot tcp:<ETH_IP> ./slotb-backup --reboot
+
+# Option 3: From inside Linux (with /boot mounted):
+sudo /usr/local/bin/googlebook-restore-slotb
 ```
 
-A damaged or unreadable vendor image, unsupported Fastboot read-back, or an Android OTA in Slot B causes restoration to stop before flashing. This deliberately limits recovery: there is no unsafe override. The legacy `--no-promote` flag is accepted but does not bypass any check; `--install-hook` is rejected. `vbmeta` image contents, Slot A images and Android dynamic-partition metadata are not rewritten.
-
-The [phone app](android-restore-app/README.md) applies the same checks and uses Android's folder picker for backups. Only use “Set Slot B” when you know which OS is installed there; that action selects a slot and does not repair it.
-
-**Existing installations:** rebuild Slot B from the updated source and update `/boot/slotb-backup/googlebook-restore-slotb` and any installed copies. The new initramfs installs a GPU startup service without automatic recovery and removes the old broad disk/sudo grants. On a rooted Android installation, remove the previously installed `/data/adb/service.d/99-googlebook-restore-slotb.sh` hook before rebooting Android. Old initramfs images, scripts and APKs retain the unsafe behavior until replaced. These are deployment steps, not actions performed by a source update alone.
+- **Self-Healing After an Update:** After running the command above, boot into **Fedora** once. Linux automatically moves the newly updated Android system into Slot A and switches Slot B back to Linux.
+- You can also restore from an Android phone over LAN using the [Android restore app](android-restore-app/README.md).
 
 ---
 
@@ -203,6 +215,7 @@ The [phone app](android-restore-app/README.md) applies the same checks and uses 
 ## 6. Other Distributions and Experimental Windows Research
 
 - **[`googleboot-menu/`](googleboot-menu/README.md)**: Graphical DRM/KMS + `kexec` universal bootloader (`2880x1800` OLED) with live-editable themes (`theme.conf`), built-in LUKS2 passphrase modal, hotplug USB ISO scanner, and One-Shot Googlebook OS slot switching.
+- **[`docs/USB_DEBUGGING_AND_TCP_FASTBOOT.md`](docs/USB_DEBUGGING_AND_TCP_FASTBOOT.md)**: Reverse-engineered Moonstone USB-C topology (`linkedDeviceUSBPortPaths: []`), Wireless ADB $\rightarrow$ TCP Fastboot (`tcp:<ETH_IP>:5554`) workflow, active Host-to-Host cables (`067b:27a7` / `18d1:5084`), and Depthcharge `fastboot_cmds` (`oem sha256`).
 - **[`docs/ANY_DISTRO_AND_OS_SWITCHING.md`](docs/ANY_DISTRO_AND_OS_SWITCHING.md)**: Requirements and limits for other distributions and OS switching.
 - **[`docs/WINDOWS_11_BARE_METAL_AND_CROSECBUS.md`](docs/WINDOWS_11_BARE_METAL_AND_CROSECBUS.md)**: Experimental Windows research. The builder emits a U-Boot ELF artifact, not a validated `kexec`-bootable bzImage.
 

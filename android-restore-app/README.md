@@ -1,22 +1,23 @@
-# Googlebook Slot B Restore for Android Phones
+# Googlebook Slot B Restore (Android Phone App)
 
-This app selects Slot B or restores an **existing, positively identified Linux Slot B** over USB-C OTG or TCP Fastboot. It never stages Linux into Slot A or promotes Android OTA metadata. Post-OTA recovery is unsupported.
+Restore Linux on your Acer Googlebook 14 (`Moonstone`) directly from an Android phone over **TCP Fastboot (`<IP>:5554`, recommended)** or an active Host-to-Host USB cable.
 
-## Build and Install
+## Build & Install
 
-Build on macOS with Java available using `./android-restore-app/build-apk.sh`, then install `android-restore-app/bin/googlebook-slotb-restore.apk`. The script uses the cached debug signing key; retain that key to update an existing installation without changing its signer. The bundled APK is built from this revision; older APKs retain the unsafe staging behavior.
+```bash
+# Build standalone APK (37 KB):
+./android-restore-app/build-apk.sh
 
-## Choose Backups and Restore
+# Or bundle slotb-backup/*.img directly inside the APK:
+./android-restore-app/build-apk.sh --bundle-images
+```
 
-1. Copy `boot_b.img`, `init_boot_b.img`, and `vendor_boot_b.img` from the laptop's `/boot/slotb-backup/` into a folder on your phone.
-2. Tap **Choose backup folder** and select that subfolder using Android's system picker. Select the `slotb-backup` subfolder rather than the entire Downloads root. The app retains access across restarts.
-3. Connect the laptop in Fastboot mode, select USB or TCP, and check status.
-4. Tap **Flash & Restore Linux Slot B**. The app validates all three backups and partition capacities, then reads the existing `vendor_boot_b` header and bootconfig before any flash.
+Install `android-restore-app/bin/googlebook-slotb-restore.apk` on your phone.
 
-Fastboot `fetch` support is required. A missing permission, incomplete backup, unsupported read-back, damaged vendor image, or Android image in Slot B stops the restore before writing. The active-slot letter is never used to infer the installed OS. `vbmeta` images are not flashed.
+## How to Restore Linux
 
-With no selected folder, app-specific external storage and bundled `assets/slotb-backup/` images remain available. `./android-restore-app/build-apk.sh --bundle-images` includes files from the repository's `slotb-backup/` directory. With a selected folder, all images must come from that folder; missing images are not silently mixed with another backup set.
-
-**Set Slot B & Reboot** only changes the selected boot slot. After an OTA, B may contain Android rather than Linux. The app does not establish a safe post-OTA recovery path.
-
-The build and fixture tests do not replace testing on a phone and a Moonstone laptop. Keep a complete disk backup and tested factory recovery available.
+1. **Load your backup images:** Copy `boot_b.img`, `init_boot_b.img`, and `vendor_boot_b.img` from `/boot/slotb-backup/` onto your phone and tap **Choose backup folder** (skip this step if you installed the `--bundle-images` APK).
+2. **Enter Fastboot on the laptop:** Plug a USB-C Ethernet adapter into the Googlebook and boot into **Bootloader (Fastboot)** mode.
+3. **Connect over LAN:** Select **TCP Fastboot (LAN)** in the app and enter the IP address shown on the laptop screen (e.g. `192.168.8.219:5554`).
+4. **Flash:** Leave **Promote Android OTA (Slot B -> Slot A)** checked and tap **Flash & Restore Linux Slot B**.
+   - If you just installed an Android system update, boot **Fedora** once when the menu appears — Linux will automatically move the updated Android system to Slot A and switch Slot B back to Linux.

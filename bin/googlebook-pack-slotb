@@ -47,7 +47,9 @@ log "targets: $BOOT_B $INIT_B $VEND_B"
 
 SELF_DIR="$(dirname "$(dirname "$(readlink -f "$0")")")"
 export PATH="$SELF_DIR/bin:/usr/local/bin:$PATH"
-command -v mkbootimg >/dev/null || dnf install -y android-tools >/dev/null 2>&1 || true
+command -v mkbootimg >/dev/null || dnf install -y android-tools >/dev/null 2>&1 || apt-get install -y mkbootimg >/dev/null 2>&1 || true
+# Slot B needs a systemd-based dracut initramfs; Ubuntu's default initramfs-tools cannot build it.
+command -v dracut >/dev/null || { log "dracut not found. On Ubuntu/Debian run: sudo apt install dracut zstd (replaces initramfs-tools)"; exit 1; }
 command -v mkbootimg >/dev/null || { log "mkbootimg unavailable"; exit 1; }
 mkbootimg --help >/dev/null || { log "mkbootimg cannot run"; exit 1; }
 

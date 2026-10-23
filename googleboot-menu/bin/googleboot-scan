@@ -18,6 +18,13 @@ mkdir -p "$BOOT_MNT" "$USB_MNT" 2>/dev/null || true
 
 modprobe nvme nvme_core ext4 btrfs vfat fat dm_crypt usb_storage uas 2>/dev/null || true
 
+# dracut copies the host's NAME/ID into initrd-release, so the menu shows the installed distro.
+OS_NAME="Fedora" OS_ID="fedora"
+if [[ -r /etc/initrd-release ]]; then
+  OS_NAME=$(. /etc/initrd-release; echo "${NAME:-Fedora}")
+  OS_ID=$(. /etc/initrd-release; echo "${ID:-fedora}")
+fi
+
 DISK="${GOOGLEBOOK_DISK:-/dev/nvme0n1}"
 BOOT_PART="${GOOGLEBOOK_BOOT_PART:-/dev/nvme0n1p11}"
 ROOT_PART="${GOOGLEBOOK_ROOT_PART:-/dev/nvme0n1p32}"
@@ -213,10 +220,10 @@ scan_entries() {
 
       local os_type
       os_type=$(detect_os_type "$title")
-      local card_title="${title:-Fedora}"
+      local card_title="${title:-$OS_NAME}"
       if [[ $found_linux -eq 0 ]]; then
-        card_title="Fedora"
-        os_type="fedora"
+        card_title="$OS_NAME"
+        os_type=$(detect_os_type "$OS_ID")
       fi
       echo "${id}|${card_title}|KERNEL ${version} - DIRECT BOOT|${os_type}|${needs_luks}|${ROOT_PART}|/usr/local/bin/googleboot-scan --boot ${id}"
       echo "${id}|${BOOT_MNT}/${linux}|${BOOT_MNT}/${initrd}|${options}" >> "$STATE_FILE"
@@ -233,10 +240,10 @@ scan_entries() {
       local initrd="$BOOT_MNT/initramfs-${kver}.img"
       [[ -f "$initrd" ]] || initrd="$BOOT_MNT/initrd.img-${kver}"
       local id="kver:${kver}"
-      local luks_uuid="" cmdline
-      luks_uuid=$(get_luks_uuid "$ROOT_PART")
-      cmdline="console=tty0 rw rootflags=subvol=root rd.luks.uuid=${luks_uuid} clk_ignore_unused selinux=0"
-      echo "${id}|Fedora|KERNEL ${kver^^} - OMARCHY|fedora|${needs_luks}|${ROOT_PART}|/usr/local/bin/googleboot-scan --boot ${id}"
+      # Slot B's cmdline was built by googlebook-pack-slotb for this root (subvol/LUKS/ext4 as detected).
+      local cmdline
+      cmdline=$(</proc/cmdline)
+      echo "${id}|${OS_NAME}|KERNEL ${kver^^}|$(detect_os_type "$OS_ID")|${needs_luks}|${ROOT_PART}|/usr/local/bin/googleboot-scan --boot ${id}"
       echo "${id}|${vmlinuz}|${initrd}|${cmdline}" >> "$STATE_FILE"
       found_linux=1
     done
@@ -246,7 +253,7 @@ scan_entries() {
   # always emit the primary Fedora card even if /boot is unmounted or empty.
   if [[ $found_linux -eq 0 ]]; then
     if [[ -b "$ROOT_PART" ]] || [[ -b /dev/nvme0n1p32 ]] || is_luks_part "$ROOT_PART"; then
-      echo "fedomakase|Fedora|Fedora 44 • Omarchy Hyprland|fedora|${needs_luks}|${ROOT_PART}|/usr/local/bin/googleboot-scan --boot fedomakase"
+      echo "fedomakase|${OS_NAME}|${OS_NAME}|$(detect_os_type "$OS_ID")|${needs_luks}|${ROOT_PART}|/usr/local/bin/googleboot-scan --boot fedomakase"
       echo "fedomakase|SlotB-Direct|SlotB-Initrd|root=${ROOT_PART}" >> "$STATE_FILE"
       found_linux=1
     fi

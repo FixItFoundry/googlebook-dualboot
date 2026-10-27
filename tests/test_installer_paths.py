@@ -26,7 +26,7 @@ case "$1" in
   *) cat >/dev/null; printf archive ;;
 esac
 ''',
-                'modprobe': '#!/bin/sh\nexit 0\n',
+                'modprobe': '#!/bin/sh\nexit 1\n',
                 'depmod': '#!/bin/sh\nexit 0\n',
             }
             for name, source in stubs.items():
@@ -40,6 +40,35 @@ esac
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             for name in ('boot_b.img', 'init_boot_b.img', 'vendor_boot_b.img'):
                 self.assertGreater((work / 'out' / name).stat().st_size, 0)
+            self.assertIn(b'inst.stage2=http://localhost:8080', (work / 'out/vendor_boot_b.img').read_bytes())
+
+            # Verify Fedora Live (LiveOS/squashfs.img) and Ubuntu Casper Live (casper/vmlinuz + /lib/modules)
+            (work / 'iso/LiveOS').mkdir(parents=True)
+            (work / 'iso/LiveOS/squashfs.img').write_bytes(b'squash')
+            (work / 'iso/EFI/BOOT').mkdir(parents=True)
+            (work / 'iso/EFI/BOOT/grub.cfg').write_text('linux /images/pxeboot/vmlinuz root=live:CDLABEL=Fedora-WS-Live-44 rd.live.image\n')
+            res_live = subprocess.run(['bash', str(ROOT / 'scripts/build-slotb-installer.sh'),
+                                       './iso', './out-live', 'usb'], cwd=work,
+                                      env=env, capture_output=True, text=True)
+            self.assertEqual(res_live.returncode, 0, res_live.stdout + res_live.stderr)
+            self.assertIn(b'root=live:CDLABEL=Fedora-WS-Live-44 rd.live.image',
+                          (work / 'out-live/vendor_boot_b.img').read_bytes())
+
+            casper = work / 'ubuntu/casper'
+            casper.mkdir(parents=True)
+            (casper / 'vmlinuz').write_bytes(b'kernel')
+            (casper / 'initrd.zst').write_bytes(b'archive')
+            (commands / 'cpio').write_text('''#!/bin/sh
+case "$1" in
+  -idm) cat >/dev/null; mkdir -p lib/modules/6.19.10-300.fc44.x86_64; ;;
+  *) cat >/dev/null; printf archive ;;
+esac
+''')
+            res_ubu = subprocess.run(['bash', str(ROOT / 'scripts/build-slotb-installer.sh'),
+                                      './ubuntu', './out-ubu', 'usb'], cwd=work,
+                                     env=env, capture_output=True, text=True)
+            self.assertEqual(res_ubu.returncode, 0, res_ubu.stdout + res_ubu.stderr)
+            self.assertIn(b'boot=casper', (work / 'out-ubu/vendor_boot_b.img').read_bytes())
 
     def test_shrink_userdata_script_guards_and_flow(self):
         with tempfile.TemporaryDirectory() as temp:

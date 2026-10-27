@@ -60,6 +60,9 @@ elif VMLINUZ=$(first_file "$ISO_DIR"/casper/vmlinuz*) && INITRD=$(first_file "$I
   MODE="ubuntu-live"
 elif VMLINUZ=$(first_file "$ISO_DIR"/live/vmlinuz*) && INITRD=$(first_file "$ISO_DIR"/live/initrd*); then
   MODE="debian-live"
+elif VMLINUZ=$(first_file "$ISO_DIR"/install.amd/vmlinuz "$ISO_DIR"/linux) &&
+     INITRD=$(first_file "$ISO_DIR"/install.amd/gtk/initrd.gz "$ISO_DIR"/install.amd/initrd.gz "$ISO_DIR"/initrd.gz); then
+  MODE="debian-installer"
 else
   echo "Error: Unrecognized ISO layout in $ISO_DIR" >&2
   exit 1
@@ -67,7 +70,7 @@ fi
 
 ISO_LABEL="${SOURCE#LABEL=}"
 if [[ "$SOURCE" == "usb" || "$SOURCE" == "auto" || -z "$SOURCE" ]]; then
-  ISO_LABEL=$(grep -rhoE '(CDLABEL|LABEL|archisolabel)=[^ "]+' "$ISO_DIR"/{EFI,boot,isolinux,loader} 2>/dev/null | head -1 | cut -d= -f2 || true)
+  ISO_LABEL=$(grep -rhoE '(CDLABEL|LABEL|archisolabel)=[^ "]+' "$ISO_DIR"/{EFI,boot,isolinux,loader,arch} 2>/dev/null | head -1 | cut -d= -f2 | sed 's/\\x20/ /g' || true)
   ISO_LABEL="${ISO_LABEL:-LIVE}"
 fi
 
@@ -83,7 +86,27 @@ unpack_initrd() {
     return 0
   fi
   local stream="$img"
-  if [[ -x /usr/lib/dracut/skipcpio ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$img" "$WORK/early.cpio" "$WORK/stripped.img" <<'PY' 2>/dev/null || true
+import re, sys
+data = open(sys.argv[1], "rb").read()
+pos = 0
+while data[pos:pos+6] in (b"070701", b"070702"):
+    m = re.search(b"TRAILER!!!\x00+", data[pos:])
+    if not m:
+        break
+    pos += m.end()
+    while pos < len(data) and data[pos] == 0:
+        pos += 1
+if pos > 0 and pos < len(data):
+    open(sys.argv[2], "wb").write(data[:pos])
+    open(sys.argv[3], "wb").write(data[pos:])
+PY
+    if [[ -s "$WORK/early.cpio" ]]; then
+      (cd "$dst" && cpio -idm --quiet < "$WORK/early.cpio" 2>/dev/null || true)
+      stream="$WORK/stripped.img"
+    fi
+  elif [[ -x /usr/lib/dracut/skipcpio ]]; then
     /usr/lib/dracut/skipcpio "$img" > "$WORK/stripped.img" 2>/dev/null && [[ -s "$WORK/stripped.img" ]] && stream="$WORK/stripped.img"
   fi
   (cd "$dst" && (
@@ -103,6 +126,13 @@ if [[ ! -d "$WORK/unpacked/usr/lib/modules" && -d "$WORK/unpacked/lib/modules" ]
   mv "$WORK/unpacked/lib/modules" "$WORK/unpacked/usr/lib/modules"
   ln -snf ../usr/lib/modules "$WORK/unpacked/lib/modules"
 fi
+
+# Register early Coreboot framebuffer modules across initramfs-tools (/conf/modules),
+# mkinitcpio (/config), and systemd/dracut (/etc/modules-load.d)
+[[ -d "$WORK/unpacked/conf" ]] && printf "coreboot_table\nframebuffer-coreboot\n" >> "$WORK/unpacked/conf/modules"
+[[ -f "$WORK/unpacked/config" ]] && printf '\nMODULES="${MODULES:+$MODULES }coreboot_table framebuffer-coreboot"\n' >> "$WORK/unpacked/config"
+mkdir -p "$WORK/unpacked/etc/modules-load.d"
+printf "coreboot_table\nframebuffer-coreboot\n" > "$WORK/unpacked/etc/modules-load.d/coreboot-fb.conf"
 
 KVER=$(ls -1 "$WORK/unpacked/usr/lib/modules" | head -1)
 echo "      Detected kernel version: $KVER ($MODE)"
@@ -196,7 +226,7 @@ case "$MODE" in
     ;;
   arch-live)
     if [[ "$SOURCE" == http://* || "$SOURCE" == https://* ]]; then
-      STAGE_ARGS="archisobasedir=arch archiso_http_srv=${SOURCE%/}/ ip=:::::eth0:dhcp cow_spacesize=4G"
+      STAGE_ARGS="archisobasedir=arch archiso_http_srv=${SOURCE%/}/ ip=::::::dhcp cow_spacesize=4G"
     else
       STAGE_ARGS="archisobasedir=arch archisolabel=${ISO_LABEL} cow_spacesize=4G"
     fi
@@ -216,6 +246,9 @@ case "$MODE" in
     else
       STAGE_ARGS="boot=live"
     fi
+    ;;
+  debian-installer)
+    STAGE_ARGS="vga=normal fb=true"
     ;;
 esac
 

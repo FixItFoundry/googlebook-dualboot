@@ -80,7 +80,7 @@ If you are keeping the stock 512 GB NVMe inside the Googlebook (`nvme0n1`), you 
      fastboot -s tcp:<ETH_IP>:5554 flashing unlock
      ```
 - **Host Tools:** Android `adb`/`fastboot` on your computer, plus a Linux build environment with `python3`, `bash`, `dracut`, `cpio`, `zstd`, `make`, `gcc`, `zlib`, `kmod`, `util-linux`, `sgdisk`, and kernel headers.
-- **Ubuntu (untested):** Slot B needs `dracut`. Ubuntu uses `initramfs-tools` by default, so on the installed Ubuntu run `sudo apt install dracut zstd linux-headers-$(uname -r)` before `googlebook-pack-slotb`. The menu shows the distro name automatically.
+- **Ubuntu / Debian:** Slot B needs `dracut` (`dracut-core` coexists cleanly with `initramfs-tools`). On the installed Ubuntu/Debian system, run `sudo apt install dracut-core zstd kexec-tools linux-headers-$(uname -r)` before `googlebook-pack-slotb` (which also auto-installs `/etc/kernel/postinst.d/zz-googlebook-slotb` for `apt` kernel updates). The menu shows the distro name automatically.
 
 ### Step 1: Boot the Slot B Installer
 [`scripts/build-slotb-installer.sh`](scripts/build-slotb-installer.sh) auto-detects both **Live ISOs** (Fedora Workstation Live, Ubuntu/Pop!_OS/Mint Casper, Debian Live, Arch/CachyOS Live) and **Stage2 Installers** (Fedora Server / Everything / Fedomakase), and auto-selects matching `coreboot-mods` (or builds them if matching kernel headers are installed on the host).

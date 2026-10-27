@@ -11,7 +11,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 RD_DIR="${1:?Usage: $0 /path/to/unpacked_rd_vendor}"
 
-make -B -C "$SCRIPT_DIR"
+make -B -C "$SCRIPT_DIR" 2>/dev/null || [[ -x "$SCRIPT_DIR/bin/googleboot-menu" ]]
 
 mkdir -p "$RD_DIR/usr/local/bin" \
          "$RD_DIR/boot/googlebook-theme/icons" \
@@ -28,11 +28,7 @@ cp -f "$SCRIPT_DIR/theme/theme.conf" "$RD_DIR/boot/googlebook-theme/theme.conf"
 chmod 755 "$RD_DIR/usr/local/bin/googleboot-menu" \
           "$RD_DIR/usr/local/bin/googleboot-scan"
 
-if [[ -x /tmp/orig-initrd/usr/bin/kexec ]]; then
-  cp -f /tmp/orig-initrd/usr/bin/kexec "$RD_DIR/usr/bin/kexec"
-  cp -f /tmp/orig-initrd/usr/bin/kexec "$RD_DIR/usr/sbin/kexec"
-  chmod 755 "$RD_DIR/usr/bin/kexec" "$RD_DIR/usr/sbin/kexec"
-elif command -v kexec >/dev/null 2>&1; then
+if command -v kexec >/dev/null 2>&1; then
   cp -f "$(command -v kexec)" "$RD_DIR/usr/sbin/kexec"
   chmod 755 "$RD_DIR/usr/sbin/kexec"
 fi
@@ -44,13 +40,13 @@ rm -f "$RD_DIR/etc/udev/rules.d/99-googlebook-slotb.rules" "$RD_DIR/etc/sudoers.
 rm -f "$RD_DIR/usr/lib/systemd/system/sysinit.target.wants/plymouth-start.service" \
       "$RD_DIR/etc/systemd/system/sysinit.target.wants/plymouth-start.service" 2>/dev/null || true
 
-# Ensure systemd-cryptsetup waits for googleboot-menu and skips re-prompting if already unlocked
-CRYPT_DROPIN_DIR="$RD_DIR/etc/systemd/system/systemd-cryptsetup@luks\\x2d352df276\\x2db00d\\x2d4c45\\x2d8ce7\\x2d495d423517c7.service.d"
+# Ensure systemd-cryptsetup waits for googleboot-menu and skips re-prompting if already unlocked (any LUKS UUID/name)
+CRYPT_DROPIN_DIR="$RD_DIR/etc/systemd/system/systemd-cryptsetup@.service.d"
 mkdir -p "$CRYPT_DROPIN_DIR"
 cat > "$CRYPT_DROPIN_DIR/skip-if-unlocked.conf" << 'EOF'
 [Unit]
 After=googleboot-menu.service
-ConditionPathExists=!/dev/mapper/luks-352df276-b00d-4c45-8ce7-495d423517c7
+ConditionPathExists=!/dev/mapper/%i
 EOF
 
 cat > "$RD_DIR/etc/systemd/system/googleboot-menu.service" << 'EOF'

@@ -47,9 +47,10 @@ log "targets: $BOOT_B $INIT_B $VEND_B"
 
 SELF_DIR="$(dirname "$(dirname "$(readlink -f "$0")")")"
 export PATH="$SELF_DIR/bin:/usr/local/bin:$PATH"
-command -v mkbootimg >/dev/null || dnf install -y android-tools >/dev/null 2>&1 || apt-get install -y mkbootimg >/dev/null 2>&1 || true
-# Slot B needs a systemd-based dracut initramfs; Ubuntu's default initramfs-tools cannot build it.
-command -v dracut >/dev/null || { log "dracut not found. On Ubuntu/Debian run: sudo apt install dracut zstd (replaces initramfs-tools)"; exit 1; }
+command -v mkbootimg >/dev/null || dnf install -y android-tools >/dev/null 2>&1 || apt-get install -y mkbootimg >/dev/null 2>&1 || pacman -S --noconfirm --needed android-tools >/dev/null 2>&1 || true
+# Slot B needs a systemd-based dracut initramfs; dracut-core coexists with Ubuntu's initramfs-tools.
+command -v dracut >/dev/null || apt-get install -y dracut-core zstd kexec-tools >/dev/null 2>&1 || pacman -S --noconfirm --needed dracut zstd kexec-tools >/dev/null 2>&1 || true
+command -v dracut >/dev/null || { log "dracut not found. Install dracut-core/dracut, zstd, and kexec-tools first."; exit 1; }
 command -v mkbootimg >/dev/null || { log "mkbootimg unavailable"; exit 1; }
 mkbootimg --help >/dev/null || { log "mkbootimg cannot run"; exit 1; }
 
@@ -115,15 +116,16 @@ SENSOR_MODS_DIR="$SELF_DIR/sensor-mods"
 [[ -d "$SENSOR_MODS_DIR" ]] || SENSOR_MODS_DIR="/usr/local/share/googlebook-sensors"
 [[ -d "$SENSOR_MODS_DIR" ]] || SENSOR_MODS_DIR="/usr/share/omarchy/install/hardware/sensor-mods"
 if [[ -d "$SENSOR_MODS_DIR" ]]; then
-  if ! modinfo -k "$KVER" cros_ec_ishtp >/dev/null 2>&1; then
+  if [[ -f "$SENSOR_MODS_DIR/prebuilt/$KVER/cros_ec_ishtp.ko" ]]; then
+    install -D -m644 "$SENSOR_MODS_DIR/prebuilt/$KVER/cros_ec_ishtp.ko" "/lib/modules/$KVER/extra/cros_ec_ishtp.ko"
+  elif ! modinfo -k "$KVER" cros_ec_ishtp >/dev/null 2>&1 && [[ -d "/lib/modules/$KVER/build" ]]; then
     SENSOR_BUILD=$(mktemp -d)
     cp "$SENSOR_MODS_DIR"/{Makefile,cros_ec.h,cros_ec_ishtp.c} "$SENSOR_BUILD/"
-    if ! make -C "/lib/modules/$KVER/build" M="$SENSOR_BUILD" modules; then
-      rm -rf "$SENSOR_BUILD"
-      log "cannot build cros_ec_ishtp for $KVER; boot partitions unchanged"
-      exit 1
+    if make -C "/lib/modules/$KVER/build" M="$SENSOR_BUILD" modules >/dev/null 2>&1; then
+      install -D -m644 "$SENSOR_BUILD/cros_ec_ishtp.ko" "/lib/modules/$KVER/extra/cros_ec_ishtp.ko"
+    else
+      log "warning: could not build cros_ec_ishtp for $KVER; continuing without tablet sensor bridge"
     fi
-    install -D -m644 "$SENSOR_BUILD/cros_ec_ishtp.ko" "/lib/modules/$KVER/extra/cros_ec_ishtp.ko"
     rm -rf "$SENSOR_BUILD"
   fi
   install -D -m644 "$SENSOR_MODS_DIR/firmware/intel/ish/ish_ptl_62b0f067_501de2f8.bin" \
@@ -155,7 +157,7 @@ W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
 
 # --- build hostonly initramfs omitting blacklisted GPU/Wi-Fi/BT/Audio firmware so it fits in Slot B ---
-dracut -f --hostonly --kver "$KVER" \
+dracut -f --hostonly --no-early-microcode --kver "$KVER" \
   --omit-drivers "i915 xe amdgpu radeon nouveau cxgb4 iwlwifi iwlmld btintel btintel_pcie bluetooth cfg80211 mac80211 snd snd_sof snd_sof_pci_intel_ptl soundwire_bus intel_vpu" \
   --add-drivers "nvme nvme_core btrfs uas usb_storage coreboot_table framebuffer-coreboot cros_ec cros_ec_lpcs cros_ec_keyb" \
   --compress "zstd -19 -T0" "$W/initramfs.img" >/dev/null
@@ -289,7 +291,7 @@ if [[ -d /boot ]]; then
   log "saved Slot B backup to /boot/slotb-backup"
 fi
 
-# kernel-install hook so every kernel update refreshes Slot B
+# kernel-install (Fedora/systemd) & postinst.d (Ubuntu/Debian) hooks so kernel updates refresh Slot B
 HOOK=/etc/kernel/install.d/95-googlebook-slotb.install
 if [[ ! -f "$HOOK" ]]; then
   mkdir -p /etc/kernel/install.d
@@ -300,5 +302,33 @@ if [[ ! -f "$HOOK" ]]; then
 /usr/local/bin/googlebook-pack-slotb "$2" || true
 EOF
   chmod +x "$HOOK"
+fi
+POSTINST=/etc/kernel/postinst.d/zz-googlebook-slotb
+if [[ ! -f "$POSTINST" ]]; then
+  mkdir -p /etc/kernel/postinst.d
+  cat > "$POSTINST" <<'EOF'
+#!/bin/sh
+# Refresh Googlebook Slot B (depthcharge) on Debian/Ubuntu kernel install
+[ -n "$1" ] && /usr/local/bin/googlebook-pack-slotb "$1" || true
+EOF
+  chmod +x "$POSTINST"
+fi
+if command -v pacman >/dev/null 2>&1 || [[ -d /etc/pacman.d ]]; then
+  PACMAN_HOOK=/etc/pacman.d/hooks/95-googlebook-slotb.hook
+  if [[ ! -f "$PACMAN_HOOK" ]]; then
+    mkdir -p /etc/pacman.d/hooks
+    cat > "$PACMAN_HOOK" <<'EOF'
+[Trigger]
+Type = Path
+Operation = Install
+Operation = Upgrade
+Target = usr/lib/modules/*/vmlinuz
+
+[Action]
+Description = Refreshing Googlebook Slot B (depthcharge) boot images...
+When = PostTransaction
+Exec = /usr/local/bin/googlebook-pack-slotb
+EOF
+  fi
 fi
 log "done"

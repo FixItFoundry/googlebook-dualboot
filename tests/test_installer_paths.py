@@ -57,10 +57,18 @@ esac
             casper = work / 'ubuntu/casper'
             casper.mkdir(parents=True)
             (casper / 'vmlinuz').write_bytes(b'kernel')
-            (casper / 'initrd.zst').write_bytes(b'archive')
+            # Simulate Ubuntu 3-segment initrd (two uncompressed 070701 microcode/uuid headers + compressed payload)
+            (casper / 'initrd.zst').write_bytes(b'070701microcode1TRAILER!!!\x00\x00070701uuid2TRAILER!!!\x00\x00PAYLOAD')
             (commands / 'cpio').write_text('''#!/bin/sh
 case "$1" in
-  -idm) cat >/dev/null; mkdir -p lib/modules/6.19.10-300.fc44.x86_64; ;;
+  -idm)
+    data=$(cat)
+    case "$data" in
+      *uuid2*) mkdir -p conf; printf "UUID=1234\\n" > conf/uuid.conf ;;
+      PAYLOAD) [ -f conf/uuid.conf ] || exit 1; mkdir -p lib/modules/6.19.10-300.fc44.x86_64 ;;
+      *) exit 1 ;;
+    esac
+    ;;
   *) cat >/dev/null; printf archive ;;
 esac
 ''')
@@ -69,6 +77,34 @@ esac
                                      env=env, capture_output=True, text=True)
             self.assertEqual(res_ubu.returncode, 0, res_ubu.stdout + res_ubu.stderr)
             self.assertIn(b'boot=casper', (work / 'out-ubu/vendor_boot_b.img').read_bytes())
+
+            # Verify Arch Linux (arch-live) and Debian Non-Live (debian-installer)
+            arch = work / 'arch/arch/boot/x86_64'
+            arch.mkdir(parents=True)
+            (arch / 'vmlinuz-linux').write_bytes(b'kernel')
+            (arch / 'initramfs-linux.img').write_bytes(b'archive')
+            (commands / 'cpio').write_text('''#!/bin/sh
+case "$1" in
+  -idm) cat >/dev/null; mkdir -p usr/lib/modules/6.19.10-300.fc44.x86_64; printf 'MODULES=""\\n' > config ;;
+  *) cat >/dev/null; printf archive ;;
+esac
+''')
+            res_arch = subprocess.run(['bash', str(ROOT / 'scripts/build-slotb-installer.sh'),
+                                       './arch', './out-arch', 'http://192.168.8.188:8080'], cwd=work,
+                                      env=env, capture_output=True, text=True)
+            self.assertEqual(res_arch.returncode, 0, res_arch.stdout + res_arch.stderr)
+            self.assertIn(b'archiso_http_srv=http://192.168.8.188:8080/ ip=::::::dhcp',
+                          (work / 'out-arch/vendor_boot_b.img').read_bytes())
+
+            deb = work / 'debian/install.amd/gtk'
+            deb.mkdir(parents=True)
+            (work / 'debian/install.amd/vmlinuz').write_bytes(b'kernel')
+            (deb / 'initrd.gz').write_bytes(b'archive')
+            res_deb = subprocess.run(['bash', str(ROOT / 'scripts/build-slotb-installer.sh'),
+                                      './debian', './out-deb', 'usb'], cwd=work,
+                                     env=env, capture_output=True, text=True)
+            self.assertEqual(res_deb.returncode, 0, res_deb.stdout + res_deb.stderr)
+            self.assertIn(b'vga=normal fb=true', (work / 'out-deb/vendor_boot_b.img').read_bytes())
 
     def test_shrink_userdata_script_guards_and_flow(self):
         with tempfile.TemporaryDirectory() as temp:

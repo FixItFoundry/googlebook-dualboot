@@ -155,6 +155,15 @@ unlock_luks() {
   rm -f "$KEY_FILE"
 
   if [[ $rc -eq 0 ]]; then
+    # Alias to /etc/crypttab target name (e.g. Ubuntu dm_crypt-0 / nvme0n1p32_crypt or Arch cryptroot)
+    if [[ -s /etc/crypttab ]]; then
+      while read -r cname cdev _rest; do
+        [[ -z "$cname" || "$cname" == \#* || "$cname" == "$mapper_name" ]] && continue
+        if [[ "$cdev" == "UUID=$uuid" || "$cdev" == "$dev" ]]; then
+          ln -snf "$mapper_name" "/dev/mapper/$cname" 2>/dev/null || true
+        fi
+      done < /etc/crypttab
+    fi
     printf '%s' "$pass" > "$MNT_BASE/luks.pass"
     chmod 600 "$MNT_BASE/luks.pass"
     udevadm trigger --action=change 2>/dev/null || true
@@ -277,21 +286,25 @@ scan_entries() {
       local label
       label=$(blkid -s LABEL -o value "$dev" 2>/dev/null || echo "$bdev")
       label="${label^^}"
+      local hw_args="rd.driver.pre=coreboot_table,framebuffer-coreboot clk_ignore_unused xe.enable_psr=0 modprobe.blacklist=i915"
       if [[ -f "$mp/images/pxeboot/vmlinuz" && -f "$mp/images/pxeboot/initrd.img" ]]; then
         local id="usb:$bdev"
-        local cmdline="root=live:CDLABEL=${label} rd.live.image quiet rhgb"
+        local cmdline="root=live:CDLABEL=${label} rd.live.image quiet rhgb ${hw_args}"
+        if [[ -f "$mp/images/install.img" && ! -f "$mp/LiveOS/squashfs.img" ]]; then
+          cmdline="inst.stage2=hd:LABEL=${label} ${hw_args}"
+        fi
         echo "${id}|LIVE USB: ${label}|FEDORA / OMARCHY LIVE ISO|usb|0||/usr/local/bin/googleboot-scan --boot ${id}"
         echo "${id}|${mp}/images/pxeboot/vmlinuz|${mp}/images/pxeboot/initrd.img|${cmdline}" >> "$STATE_FILE"
       elif [[ -f "$mp/arch/boot/x86_64/vmlinuz-linux" && -f "$mp/arch/boot/x86_64/initramfs-linux.img" ]]; then
         local id="usb:$bdev"
-        local cmdline="archisobasedir=arch archisolabel=${label} cow_spacesize=4G"
+        local cmdline="archisobasedir=arch archisolabel=${label} cow_spacesize=4G ${hw_args}"
         echo "${id}|LIVE USB: ${label}|ARCH LINUX LIVE ISO|arch|0||/usr/local/bin/googleboot-scan --boot ${id}"
         echo "${id}|${mp}/arch/boot/x86_64/vmlinuz-linux|${mp}/arch/boot/x86_64/initramfs-linux.img|${cmdline}" >> "$STATE_FILE"
       elif [[ -f "$mp/casper/vmlinuz" ]]; then
         local id="usb:$bdev"
         local initrd=""
         for ir in "$mp"/casper/initrd*; do [[ -f "$ir" ]] && { initrd="$ir"; break; }; done
-        local cmdline="boot=casper quiet splash ---"
+        local cmdline="boot=casper quiet splash ${hw_args} ---"
         echo "${id}|LIVE USB: ${label}|UBUNTU / DEBIAN LIVE ISO|ubuntu|0||/usr/local/bin/googleboot-scan --boot ${id}"
         echo "${id}|${mp}/casper/vmlinuz|${initrd}|${cmdline}" >> "$STATE_FILE"
       else
@@ -310,7 +323,12 @@ run_sysroot_sync_now() {
     if [[ -n "$luks_dev" ]]; then
       mkdir -p /sysroot 2>/dev/null || true
       if [[ ! -d /sysroot/etc ]]; then
-        mount -t btrfs -o subvol=root,rw "$luks_dev" /sysroot 2>/dev/null || mount -o rw "$luks_dev" /sysroot 2>/dev/null || true
+        for opts in "subvol=root,rw" "subvol=@,rw" "rw"; do
+          if mount -o "$opts" "$luks_dev" /sysroot 2>/dev/null; then
+            [[ -d /sysroot/etc ]] && break
+            umount /sysroot 2>/dev/null || true
+          fi
+        done
       fi
       if [[ -d /sysroot/etc ]]; then
         /usr/local/bin/googlebook-sysroot-sync || true
@@ -353,7 +371,6 @@ boot_entry() {
       fi
       umount "$BOOT_MNT" 2>/dev/null || true
       udevadm settle --timeout=5 2>/dev/null || true
-      run_sysroot_sync_now
       exit 0
       ;;
     *)
@@ -366,13 +383,13 @@ boot_entry() {
           fi
           local running_kver=""
           running_kver=$(uname -r 2>/dev/null || true)
-          # If running inside Slot B initramfs and selected kernel matches running Slot B kernel,
-          # skip redundant kexec so systemd mounts /sysroot, runs googlebook-sysroot-sync, and switch-roots cleanly!
-          if [[ -f /etc/initrd-release && ( "$fkernel" == "SlotB-Direct" || ( -n "$running_kver" && "$fkernel" == *"$running_kver"* ) ) && "$target_id" != usb:* ]]; then
+          # If running inside Slot B initramfs and selected kernel matches running Slot B kernel
+          # (including Arch's unversioned /boot/vmlinuz-linux), skip redundant kexec so systemd
+          # mounts /sysroot via /proc/cmdline, runs googlebook-sysroot-sync.service, and switch-roots cleanly!
+          if [[ -f /etc/initrd-release && ( "$fkernel" == "SlotB-Direct" || "$fkernel" == */vmlinuz-linux || ( -n "$running_kver" && "$fkernel" == *"$running_kver"* ) ) && "$target_id" != usb:* ]]; then
             echo "[googleboot-scan] Proceeding via direct Slot B switch-root..."
             umount "$BOOT_MNT" 2>/dev/null || true
             udevadm settle --timeout=5 2>/dev/null || true
-            run_sysroot_sync_now
             exit 0
           fi
 

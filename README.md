@@ -80,14 +80,20 @@ If you are keeping the stock 512 GB NVMe inside the Googlebook (`nvme0n1`), you 
      fastboot -s tcp:<ETH_IP>:5554 flashing unlock
      ```
 - **Host Tools:** Android `adb`/`fastboot` on your computer, plus a Linux build environment with `python3`, `bash`, `dracut`, `cpio`, `zstd`, `make`, `gcc`, `zlib`, `kmod`, `util-linux`, `sgdisk`, and kernel headers.
-- **Ubuntu (untested):** Slot B needs `dracut`. Ubuntu uses `initramfs-tools` by default, so on the installed Ubuntu run `sudo apt install dracut zstd linux-headers-$(uname -r)` before `googlebook-pack-slotb`. The menu shows the distro name automatically.
+- **Ubuntu / Debian:** Slot B needs `dracut` (`dracut-core` coexists cleanly with `initramfs-tools`). On the installed Ubuntu/Debian system, run `sudo apt install dracut-core zstd kexec-tools linux-headers-$(uname -r)` before `googlebook-pack-slotb` (which also auto-installs `/etc/kernel/postinst.d/zz-googlebook-slotb` for `apt` kernel updates). The menu shows the distro name automatically.
 
 ### Step 1: Boot the Slot B Installer
-1. Build the Slot B installer images (`boot_b.img`, `init_boot_b.img`, `vendor_boot_b.img`):
+[`scripts/build-slotb-installer.sh`](scripts/build-slotb-installer.sh) auto-detects both **Live ISOs** (Fedora Workstation Live, Ubuntu/Pop!_OS/Mint Casper, Debian Live, Arch/CachyOS Live) and **Stage2 Installers** (Fedora Server / Everything / Fedomakase), and auto-selects matching `coreboot-mods` (or builds them if matching kernel headers are installed on the host).
+
+1. Extract your installer ISO into `./iso-extracted` (e.g., `7z x installer.iso -o./iso-extracted` or `xorriso -osirrox on -indev installer.iso -extract / ./iso-extracted`) and build the Slot B boot images (`boot_b.img`, `init_boot_b.img`, `vendor_boot_b.img`):
    ```bash
-   ./scripts/build-slotb-installer.sh ./iso-extracted ./slotb-installer http://<YOUR_HOST_IP>:8080 ./coreboot-mods/prebuilt/6.19.10-300.fc44.x86_64
+   # Option 1 — Booting a Live USB stick (Fedora Workstation Live, Ubuntu, Arch, etc. written to USB):
+   ./scripts/build-slotb-installer.sh ./iso-extracted ./slotb-installer usb
+
+   # Option 2 — Booting over LAN via HTTP (Fedora Server / Everything / Workstation / Fedomakase):
+   ./scripts/build-slotb-installer.sh ./iso-extracted ./slotb-installer http://<YOUR_HOST_IP>:8080
    ```
-2. Start an HTTP server hosting the extracted ISO directory:
+2. *(HTTP mode only)* Start an HTTP server hosting the extracted ISO directory:
    ```bash
    python3 -m http.server 8080 --bind 0.0.0.0 --directory ./iso-extracted
    ```

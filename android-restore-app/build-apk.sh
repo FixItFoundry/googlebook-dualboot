@@ -111,6 +111,7 @@ fi
   --key-pass pass:android \
   --out "$OUT_APK" \
   "$WORK_DIR/aligned.apk"
+rm -f "$OUT_APK.idsig"
 
 rm -rf "$WORK_DIR"
 ls -lh "$OUT_APK"

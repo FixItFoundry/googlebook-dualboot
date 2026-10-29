@@ -225,7 +225,3 @@ sudo /usr/local/bin/googlebook-restore-slotb
 - **[`docs/USB_DEBUGGING_AND_TCP_FASTBOOT.md`](docs/USB_DEBUGGING_AND_TCP_FASTBOOT.md)**: Reverse-engineered Moonstone USB-C topology (`linkedDeviceUSBPortPaths: []`), Wireless ADB $\rightarrow$ TCP Fastboot (`tcp:<ETH_IP>:5554`) workflow, active Host-to-Host cables (`067b:27a7` / `18d1:5084`), and Depthcharge `fastboot_cmds` (`oem sha256`).
 - **[`docs/ANY_DISTRO_AND_OS_SWITCHING.md`](docs/ANY_DISTRO_AND_OS_SWITCHING.md)**: Requirements and limits for other distributions and OS switching.
 - **[`docs/WINDOWS_11_BARE_METAL_AND_CROSECBUS.md`](docs/WINDOWS_11_BARE_METAL_AND_CROSECBUS.md)**: Experimental Windows research. The builder emits a U-Boot ELF artifact, not a validated `kexec`-bootable bzImage.
-
-## 7. Local Checks
-
-Run `python3 -m unittest discover -s tests -v` and `./tests/check-menu.sh`. These use temporary files and mocked device commands. They do not flash a disk or establish hardware/OTA compatibility. See [tests/README.md](tests/README.md) for the Android validator check.

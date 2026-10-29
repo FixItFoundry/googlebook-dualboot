@@ -46,6 +46,14 @@ log "kernel $KVER  disk $DISK"
 log "targets: $BOOT_B $INIT_B $VEND_B"
 
 SELF_DIR="$(dirname "$(dirname "$(readlink -f "$0")")")"
+[[ -d "$SELF_DIR/coreboot-mods" ]] || [[ ! -d /usr/local/share/googlebook-dualboot/coreboot-mods ]] || SELF_DIR=/usr/local/share/googlebook-dualboot
+if [[ -d "$SELF_DIR/coreboot-mods" && "$SELF_DIR" != "/usr/local/share/googlebook-dualboot" && $EUID -eq 0 ]]; then
+  mkdir -p /usr/local/share/googlebook-dualboot /usr/local/bin 2>/dev/null || true
+  cp -rf "$SELF_DIR"/{bin,coreboot-mods,audio-mods,sensor-mods,googleboot-menu} /usr/local/share/googlebook-dualboot/ 2>/dev/null || true
+  for tool in googlebook-pack-slotb googlebook-restore-slotb googlebook-switch-slot mkbootimg; do
+    [[ -f "/usr/local/share/googlebook-dualboot/bin/$tool" ]] && ln -sf "/usr/local/share/googlebook-dualboot/bin/$tool" "/usr/local/bin/$tool" 2>/dev/null || true
+  done
+fi
 export PATH="$SELF_DIR/bin:/usr/local/bin:$PATH"
 command -v mkbootimg >/dev/null || dnf install -y android-tools >/dev/null 2>&1 || apt-get install -y mkbootimg >/dev/null 2>&1 || pacman -S --noconfirm --needed android-tools >/dev/null 2>&1 || true
 # Slot B needs a systemd-based dracut initramfs; dracut-core coexists with Ubuntu's initramfs-tools.
@@ -122,6 +130,7 @@ if [[ -d "$SENSOR_MODS_DIR" ]]; then
     SENSOR_BUILD=$(mktemp -d)
     cp "$SENSOR_MODS_DIR"/{Makefile,cros_ec.h,cros_ec_ishtp.c} "$SENSOR_BUILD/"
     if make -C "/lib/modules/$KVER/build" M="$SENSOR_BUILD" modules >/dev/null 2>&1; then
+      strip --strip-debug "$SENSOR_BUILD/cros_ec_ishtp.ko" 2>/dev/null || true
       install -D -m644 "$SENSOR_BUILD/cros_ec_ishtp.ko" "/lib/modules/$KVER/extra/cros_ec_ishtp.ko"
     else
       log "warning: could not build cros_ec_ishtp for $KVER; continuing without tablet sensor bridge"
@@ -276,7 +285,7 @@ for pair in "boot_b.img:$BOOT_B" "init_boot_b.img:$INIT_B" "vendor_boot_b.img:$V
 done
 
 # Save backup copy of Slot B images & restore wrapper onto /boot (p11, unencrypted ext4)
-# for restoring an existing Linux Slot B; Android OTA promotion is unsupported.
+# for restoring Linux Slot B (and promoting Android OTAs via googlebook-restore-slotb).
 if [[ -d /boot ]]; then
   mkdir -p /boot/slotb-backup
   cp -f "$W/boot_b.img" "$W/init_boot_b.img" "$W/vendor_boot_b.img" /boot/slotb-backup/

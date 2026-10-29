@@ -82,7 +82,7 @@ case "$ACTION" in
     set_slot_attrs "0102000000000000" "0101000000000000"
     echo "Switched active slot to Slot A (Android / Aluminum OS) on $DISK."
     show_status
-    (( REBOOT )) && systemctl reboot
+    if (( REBOOT )); then systemctl reboot; fi
     ;;
   oneshot-a|android-once)
     [[ $EUID -eq 0 ]] || { echo "Run with sudo: sudo $0 $*" >&2; exit 1; }
@@ -91,14 +91,14 @@ case "$ACTION" in
     set_slot_attrs "001f000000000000" "010e000000000000"
     echo "Armed one-shot boot to Slot A (Android) with automatic fallback to Slot B (Linux)."
     show_status
-    (( REBOOT )) && systemctl reboot
+    if (( REBOOT )); then systemctl reboot; fi
     ;;
   b|B|linux|fedomakase)
     [[ $EUID -eq 0 ]] || { echo "Run with sudo: sudo $0 $*" >&2; exit 1; }
     set_slot_attrs "0101000000000000" "0102000000000000"
     echo "Switched active slot to Slot B (Linux) on $DISK."
     show_status
-    (( REBOOT )) && systemctl reboot
+    if (( REBOOT )); then systemctl reboot; fi
     ;;
   *)
     echo "Usage: sudo $(basename "$0") [status|a|b|android|android-once|linux] [--reboot]" >&2

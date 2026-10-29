@@ -42,15 +42,23 @@ final class BootImages {
         return new long[]{offset, size};
     }
 
-    static void requireLinux(byte[] config) throws IOException {
+    static String requireLinux(byte[] config) throws IOException {
         String text = new String(config, StandardCharsets.US_ASCII);
         if (!java.util.regex.Pattern.compile("(?m)^androidboot\\.(googleboot|fedomakase)=1\\r?$")
                 .matcher(text).find()) {
-            throw new IOException("Slot B is not verified Linux. Android OTA recovery is unsupported.");
+            throw new IOException("Backup vendor_boot_b.img is missing Linux bootconfig marker.");
+        }
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256").digest(config);
+            StringBuilder sb = new StringBuilder(64);
+            for (byte b : digest) sb.append(String.format(java.util.Locale.US, "%02x", b & 0xff));
+            return sb.toString();
+        } catch (Exception e) {
+            throw new IOException(e);
         }
     }
 
-    static void validate(String partition, InputStream in, long size) throws IOException {
+    static String validate(String partition, InputStream in, long size) throws IOException {
         long limit = partition.equals("boot_b") ? 64L << 20
                 : partition.equals("init_boot_b") ? 8L << 20 : 32L << 20;
         if (size < 2128 || size > limit) throw new IOException("Invalid image size: " + partition);
@@ -63,7 +71,8 @@ final class BootImages {
                 if (skipped == 0) { if (in.read() < 0) throw new IOException("Truncated image"); skipped = 1; }
                 remaining -= skipped;
             }
-            requireLinux(read(in, (int) location[1]));
+            String sha = requireLinux(read(in, (int) location[1]));
+            return location[0] + ":" + location[1] + ":" + sha;
         } else {
             byte[] h = read(in, 1584);
             long kernel = u32(h, 8), ramdisk = u32(h, 12);
@@ -73,6 +82,7 @@ final class BootImages {
                     || 4096 + align(kernel, 4096) + align(ramdisk, 4096) > size) {
                 throw new IOException("Invalid Android v4 image: " + partition);
             }
+            return "";
         }
     }
 }

@@ -12,6 +12,7 @@
 # Usage:
 #   ./build-slotb-installer.sh <extracted-iso-dir> [output-dir] [http-url|LABEL=...|usb] [coreboot-mods-dir] [extra-cmdline]
 set -euo pipefail
+export PATH="/usr/sbin:/sbin:$PATH"
 
 ISO_DIR="${1:-}"
 OUT_DIR="${2:-./slotb-installer}"
@@ -154,8 +155,89 @@ else
 fi
 
 echo "[3/4] Pruning unused GPU/NIC firmware and splitting into rd_vendor.img + rd_init.img..."
-rm -rf "$WORK/unpacked/usr/lib/firmware"/{amdgpu,i915,xe,nvidia,radeon,qed,cxgb4,netronome,mellanox,cypress,mrvl,ath*,brcm,mediatek,ti-connectivity,iwlwifi*,intel/ibt*,intel/vpu*,intel/sof*,intel/qat*,qat*,cavium,qcom,LENOVO,dell,HP} 2>/dev/null || true
-rm -rf "$WORK/unpacked/usr/lib/modules/$KVER/kernel/drivers/gpu/drm"/{amd,i915,xe,nouveau,radeon,vmwgfx,qxl,ast,mgag200} 2>/dev/null || true
+for fwdir in "$WORK/unpacked/usr/lib/firmware" "$WORK/unpacked/lib/firmware"; do
+  [[ -d "$fwdir" && ! -L "$fwdir" ]] || continue
+  find "$fwdir" -mindepth 1 -maxdepth 1 \
+    ! -name 'rtl_nic' ! -name 'intel' ! -name 'regulatory.db*' \
+    -exec rm -rf {} + 2>/dev/null || true
+  if [[ -d "$fwdir/intel" ]]; then
+    find "$fwdir/intel" -mindepth 1 -maxdepth 1 ! -name 'ish' -exec rm -rf {} + 2>/dev/null || true
+  fi
+done
+
+# Prune Stage 1 userspace bloat not needed before mounting Stage 2 / Live squashfs
+rm -rf "$WORK/unpacked/usr/lib64/python3"* \
+       "$WORK/unpacked/usr/lib/python3"* \
+       "$WORK/unpacked/usr/lib64/libpython3"* \
+       "$WORK/unpacked/usr/bin/python3"* \
+       "$WORK/unpacked/usr/share/X11" \
+       "$WORK/unpacked/usr/share/fonts" \
+       "$WORK/unpacked/usr/lib64/ossl-modules/fips.so" \
+       "$WORK/unpacked/usr/lib/udev/prefixdevname" \
+       "$WORK/unpacked/usr/lib/kbd/consolefonts/partialfonts" \
+       "$WORK/unpacked/usr/bin"/{pdata_tools,lvm,unbound,unbound-checkconf,unbound-control,vi,nvme,btrfs,btrfsck,btrfstune,ldconfig,xfs_repair,xfs_db,mdadm,mdmon,iscsiadm,iscsid,nft,dd_extract,dd_list} \
+       "$WORK/unpacked/usr/lib64"/{libstdc++.so*,librpm*.so*,libsqlite3.so*,libnftables.so*,libfreeblpriv3.*,libisns.so*} 2>/dev/null || true
+
+if [[ -d "$WORK/unpacked/usr/lib/kbd/keymaps/xkb" ]]; then
+  find "$WORK/unpacked/usr/lib/kbd/keymaps/xkb" -type f ! -name 'us*' -delete 2>/dev/null || true
+fi
+if [[ -d "$WORK/unpacked/usr/lib/kbd/consolefonts" ]]; then
+  find "$WORK/unpacked/usr/lib/kbd/consolefonts" -type f \
+    ! -name 'latarcyrheb*' ! -name 'eurlatgr*' ! -name 'default*' -delete 2>/dev/null || true
+fi
+for pks in "$WORK/unpacked/usr/bin/parse-kickstart" "$WORK/unpacked/usr/lib/dracut/modules.d/80anaconda/parse-kickstart"; do
+  if [[ -f "$pks" ]]; then
+    cat > "$pks" <<'PKSEOF'
+#!/usr/bin/bash
+TMPDIR="/tmp"
+if [ "$1" = "--tmpdir" ]; then
+    TMPDIR="$2"
+    shift 2
+fi
+ksfile="$1"
+[ -f "$ksfile" ] || exit 0
+cp -f "$ksfile" "$TMPDIR/ks.cfg.parsed"
+echo "parsed_kickstart=\"$TMPDIR/ks.cfg.parsed\"" >> "$TMPDIR/ks.info"
+grep -Eq "^[[:space:]]*text([[:space:]]|$)" "$ksfile" 2>/dev/null && echo "inst.text"
+exit 0
+PKSEOF
+    chmod 755 "$pks"
+  fi
+done
+
+# Prune non-Moonstone kernel drivers from Stage 1 initramfs
+KMOD="$WORK/unpacked/usr/lib/modules/$KVER/kernel"
+rm -rf "$KMOD/drivers"/{ata,bluetooth,crypto,firewire,gpu,infiniband,isdn,media,mmc,mtd,nvdimm,parport,pcmcia,soundwire,staging,target,ufs,watchdog} \
+       "$KMOD/drivers/block"/{mtip32xx,null_blk,rnbd,zram,brd.ko*,floppy.ko*,nbd.ko*,pktcdvd.ko*,rbd.ko*,ublk_drv.ko*,xen-blkfront.ko*,zloop.ko*} \
+       "$KMOD/drivers/md"/{bcache,persistent-data,raid*.ko*,dm-raid.ko*,dm-cache*.ko*,dm-thin*.ko*,dm-integrity.ko*,dm-multipath.ko*,dm-verity.ko*,dm-zoned.ko*,dm-clone.ko*,dm-era.ko*,dm-writecache.ko*,dm-log*.ko*,dm-bio-prison.ko*,dm-delay.ko*,dm-dust.ko*,dm-ebs.ko*,dm-flakey.ko*,dm-historical*.ko*,dm-io-affinity.ko*,dm-queue-length.ko*,dm-round-robin.ko*,dm-service-time.ko*,dm-switch.ko*,dm-unstripe.ko*,dm-zero.ko*,faulty.ko*} \
+       "$KMOD/drivers/net"/{bonding,caif,can,dsa,fddi,fjes,hamradio,hippi,hyperv,ieee802154,mctp,pcs,ppp,slip,team,vmxnet3,vxlan,wan,wireless,wwan,xen-netback,geneve.ko*,macsec.ko*,macvlan.ko*,net_failover.ko*,ntb_netdev.ko*,sungem_phy.ko*,tun.ko*,veth.ko*,virtio_net.ko*,vrf.ko*,wireguard.ko*,xen-netfront.ko*} \
+       "$KMOD/fs"/{afs,ceph,cifs,dlm,exfat,f2fs,fuse,gfs2,jffs2,jfs,lockd,netfs,nfs,nfs_common,nfsd,nilfs2,ntfs3,ocfs2,pstore,smb,ubifs,xfs} \
+       "$KMOD/net"/{8021q,bluetooth,bridge,can,ceph,dccp,dsa,ieee802154,l2tp,mac80211,mpls,netfilter,nfc,openvswitch,rds,rfkill,rxrpc,sched,sctp,smc,sunrpc,tipc,vmw_vsock,wireless,xdp,xfrm} \
+       "$KMOD/sound" 2>/dev/null || true
+
+if [[ -d "$KMOD/drivers/hid" ]]; then
+  find "$KMOD/drivers/hid" -maxdepth 1 -type f -name 'hid-*.ko*' \
+    ! -name 'hid-generic*' ! -name 'hid-multitouch*' ! -name 'hid-sensor*' ! -name 'hid-google*' \
+    -delete 2>/dev/null || true
+fi
+if [[ -d "$KMOD/drivers/net/ethernet" ]]; then
+  find "$KMOD/drivers/net/ethernet" -mindepth 1 -maxdepth 1 ! -name 'realtek' -exec rm -rf {} + 2>/dev/null || true
+fi
+if [[ -d "$KMOD/drivers/net/phy" ]]; then
+  find "$KMOD/drivers/net/phy" -maxdepth 1 -type f -name '*.ko*' \
+    ! -name 'libphy*' ! -name 'fixed_phy*' ! -name 'mdio*' -delete 2>/dev/null || true
+fi
+if [[ -d "$KMOD/drivers/scsi" ]]; then
+  find "$KMOD/drivers/scsi" -mindepth 1 -maxdepth 1 \
+    ! -name 'device_handler' ! -name 'libsas' ! -name 'sd_mod*' ! -name 'sr_mod*' \
+    ! -name 'scsi_mod*' ! -name 'scsi_common*' ! -name 'sg*' ! -name 'virtio_scsi*' \
+    -exec rm -rf {} + 2>/dev/null || true
+fi
+if [[ -d "$KMOD/fs/nls" ]]; then
+  find "$KMOD/fs/nls" -maxdepth 1 -type f -name '*.ko*' \
+    ! -name 'nls_utf8*' ! -name 'nls_iso8859*' ! -name 'nls_cp437*' ! -name 'nls_ascii*' \
+    -delete 2>/dev/null || true
+fi
 
 # Stage Moonstone sensor sources + firmware, and inject prebuilt/host sensor modules when available (non-fatal)
 SENSOR_MODS_DIR="$SCRIPT_ROOT/sensor-mods"
@@ -178,22 +260,211 @@ if [[ -d "$SENSOR_MODS_DIR" ]]; then
       "$WORK/unpacked/usr/lib/modules/$KVER/extra/cros_ec_ishtp.ko"
   fi
 fi
+
+# Decompress individually compressed modules (.ko.xz/.ko.zst/.ko.gz -> .ko) so outer zstd deduplicates across all modules
+find "$WORK/unpacked/usr/lib/modules/$KVER" -type f -name '*.ko.xz' -exec xz -d {} + 2>/dev/null || true
+find "$WORK/unpacked/usr/lib/modules/$KVER" -type f -name '*.ko.zst' -exec zstd -d --rm -q {} + 2>/dev/null || true
+find "$WORK/unpacked/usr/lib/modules/$KVER" -type f -name '*.ko.gz' -exec gzip -d {} + 2>/dev/null || true
+strip --strip-debug "$WORK/unpacked/usr/lib/modules/$KVER/extra"/*.ko 2>/dev/null || true
+
+if [[ -d "$WORK/unpacked/var/lib/dracut/hooks/cmdline" ]]; then
+  cat > "$WORK/unpacked/var/lib/dracut/hooks/cmdline/00-googlebook-early.sh" <<EOF
+#!/usr/bin/bash
+modprobe coreboot_table 2>/dev/null || insmod /lib/modules/$KVER/extra/coreboot_table.ko 2>/dev/null || true
+modprobe framebuffer-coreboot 2>/dev/null || insmod /lib/modules/$KVER/extra/framebuffer-coreboot.ko 2>/dev/null || true
+EOF
+  chmod 755 "$WORK/unpacked/var/lib/dracut/hooks/cmdline/00-googlebook-early.sh"
+fi
+if [[ -d "$WORK/unpacked/var/lib/dracut/hooks/pre-pivot" ]]; then
+  cat > "$WORK/unpacked/var/lib/dracut/hooks/pre-pivot/98-googlebook-setup.sh" <<EOF
+#!/usr/bin/bash
+if [ -d /sysroot/usr ]; then
+    mkdir -p /sysroot/usr/lib/modules/$KVER/extra 2>/dev/null || true
+    cp -f /lib/modules/$KVER/extra/*.ko /sysroot/usr/lib/modules/$KVER/extra/ 2>/dev/null || true
+    chroot /sysroot depmod -a $KVER 2>/dev/null || true
+fi
+EOF
+  chmod 755 "$WORK/unpacked/var/lib/dracut/hooks/pre-pivot/98-googlebook-setup.sh"
+fi
+
 depmod -b "$WORK/unpacked" -a "$KVER" 2>/dev/null || depmod -b "$WORK/unpacked/usr" -a "$KVER" 2>/dev/null || true
+if command -v python3 >/dev/null 2>&1; then
+  python3 - "$WORK/unpacked/usr/lib/modules/$KVER" <<'PY' 2>/dev/null || true
+import os, re, struct, sys
+
+mdir = sys.argv[1]
+if not os.path.isdir(mdir):
+    sys.exit(0)
+
+# Collect existing .ko relative paths and module names
+rel_by_mod = {}
+for root, _, files in os.walk(mdir):
+    for f in files:
+        if f.endswith(".ko"):
+            rel = os.path.relpath(os.path.join(root, f), mdir).replace("\\", "/")
+            mod = f[:-3].replace("-", "_")
+            rel_by_mod[mod] = rel
+
+dep_path = os.path.join(mdir, "modules.dep")
+dep_bin_path = os.path.join(mdir, "modules.dep.bin")
+need_rebuild = not os.path.exists(dep_bin_path)
+if os.path.exists(dep_bin_path):
+    raw = open(dep_bin_path, "rb").read()
+    if b".ko.xz" in raw or b".ko.zst" in raw or b".ko.gz" in raw or (
+        "coreboot_table" in rel_by_mod and b"coreboot_table" not in raw
+    ):
+        need_rebuild = True
+
+if need_rebuild and os.path.exists(dep_path):
+    def strip_ext(p):
+        return re.sub(r"\.ko\.(xz|zst|gz)$", ".ko", p)
+
+    dep_lines = []
+    dep_index = {}
+    seen = set()
+    for line in open(dep_path, errors="replace").read().splitlines():
+        if ":" not in line:
+            continue
+        lhs, rhs = line.split(":", 1)
+        lhs = strip_ext(lhs.strip())
+        mod = os.path.basename(lhs)[:-3].replace("-", "_")
+        if mod not in rel_by_mod:
+            continue
+        lhs = rel_by_mod[mod]
+        deps = []
+        for d in rhs.split():
+            d = strip_ext(d.strip())
+            dmod = os.path.basename(d)[:-3].replace("-", "_")
+            if dmod in rel_by_mod:
+                deps.append(rel_by_mod[dmod])
+        val = f"{lhs}: {' '.join(deps)}" if deps else f"{lhs}:"
+        dep_lines.append(val)
+        dep_index[mod] = [(0, val)]
+        seen.add(mod)
+
+    extra_deps = {
+        "coreboot_table": [],
+        "framebuffer_coreboot": ["coreboot_table"],
+        "cros_ec_ishtp": ["intel_ishtp", "cros_ec", "cros_ec_proto"],
+    }
+    for mod, reqs in extra_deps.items():
+        if mod in rel_by_mod and mod not in seen:
+            deps = [rel_by_mod[r] for r in reqs if r in rel_by_mod]
+            val = f"{rel_by_mod[mod]}: {' '.join(deps)}" if deps else f"{rel_by_mod[mod]}:"
+            dep_lines.append(val)
+            dep_index[mod] = [(0, val)]
+
+    open(dep_path, "w").write("\n".join(dep_lines) + ("\n" if dep_lines else ""))
+
+    def build_kmod_index(entries):
+        trie = {}
+        for k, vals in entries.items():
+            if not k:
+                continue
+            node = trie
+            for ch in k.encode():
+                node = node.setdefault("c", {}).setdefault(ch, {})
+            node["v"] = vals
+        buf = bytearray(b"\xb0\x07\xf4\x57\x00\x02\x00\x01\x00\x00\x00\x00")
+        def emit(node):
+            pref = bytearray()
+            while "v" not in node and len(node.get("c", {})) == 1 and node is not trie:
+                ch, nxt = next(iter(node["c"].items()))
+                pref.append(ch)
+                node = nxt
+            childs = node.get("c", {})
+            c_offs = {ch: emit(childs[ch]) for ch in sorted(childs)}
+            pos = len(buf)
+            flags = 0
+            if pref:
+                flags |= 0x80000000
+                buf.extend(pref + b"\x00")
+            if childs:
+                flags |= 0x20000000
+                first, last = min(c_offs), max(c_offs)
+                buf.extend(bytes([first, last]))
+                for ch in range(first, last + 1):
+                    buf.extend(struct.pack(">I", c_offs.get(ch, 0)))
+            if "v" in node:
+                flags |= 0x40000000
+                vals = node["v"]
+                buf.extend(struct.pack(">I", len(vals)))
+                for prio, v in vals:
+                    buf.extend(struct.pack(">I", prio) + v.encode() + b"\x00")
+            return flags | pos
+        root_off = emit(trie) if trie else 0
+        struct.pack_into(">I", buf, 8, root_off)
+        return bytes(buf)
+
+    open(dep_bin_path, "wb").write(build_kmod_index(dep_index))
+
+    for fname, extra_aliases in (
+        ("modules.alias", [
+            ("acpi*:BOOT0000:*", "coreboot_table"),
+            ("acpi*:GOOGCB00:*", "coreboot_table"),
+            ("coreboot:t00000012", "framebuffer_coreboot"),
+            ("corebootdrm", "framebuffer_coreboot"),
+            ("framebuffer_coreboot", "framebuffer_coreboot"),
+            ("ishtp:{7B7154D0-56F4-4BDC-B0D8-9E7CDAE0D6A0}", "cros_ec_ishtp"),
+        ]),
+        ("modules.symbols", []),
+    ):
+        fpath = os.path.join(mdir, fname)
+        if not os.path.exists(fpath):
+            continue
+        kept_lines = []
+        idx = {}
+        for line in open(fpath, errors="replace").read().splitlines():
+            if not line.startswith("alias "):
+                kept_lines.append(line)
+                continue
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            alias_key, mod = parts[1], parts[2].replace("-", "_")
+            if mod in rel_by_mod:
+                kept_lines.append(line)
+                lst = idx.setdefault(alias_key, [])
+                lst.append((len(lst), mod))
+        for alias_key, mod in extra_aliases:
+            if mod in rel_by_mod:
+                kept_lines.append(f"alias {alias_key} {mod}")
+                lst = idx.setdefault(alias_key, [])
+                if all(m != mod for _, m in lst):
+                    lst.append((len(lst), mod))
+        open(fpath, "w").write("\n".join(kept_lines) + "\n")
+        open(fpath + ".bin", "wb").write(build_kmod_index(idx))
+PY
+fi
 
 mv "$WORK/unpacked/usr/lib/modules" "$WORK/split_init/usr/lib/modules"
 
 pack_ramdisks() {
-  (cd "$WORK/unpacked" && find . -print0 | cpio --null -o -H newc --quiet | zstd -19 -T0 > "$OUT_DIR/rd_vendor.img")
-  (cd "$WORK/split_init" && find . -print0 | cpio --null -o -H newc --quiet | zstd -19 -T0 > "$OUT_DIR/rd_init.img")
-  VSZ=$(wc -c < "$OUT_DIR/rd_vendor.img")
-  ISZ=$(wc -c < "$OUT_DIR/rd_init.img")
+  (cd "$WORK/unpacked" && find . -print0 | cpio --null -o -H newc --quiet | (zstd --ultra -22 -T0 2>/dev/null || zstd -19 -T0) > "$OUT_DIR/rd_vendor.img")
+  (cd "$WORK/split_init" && find . -print0 | cpio --null -o -H newc --quiet | (zstd --ultra -22 -T0 2>/dev/null || zstd -19 -T0) > "$OUT_DIR/rd_init.img")
+  VSZ=$(( $(wc -c < "$OUT_DIR/rd_vendor.img") ))
+  ISZ=$(( $(wc -c < "$OUT_DIR/rd_init.img") ))
 }
 pack_ramdisks
 
-# Live ISOs sometimes bundle sound/wireless/media modules in initrd; trim if rd_init exceeds 8 MiB
-if (( ISZ > 8380416 )); then
-  rm -rf "$WORK/split_init/usr/lib/modules/$KVER/kernel"/{sound,drivers/media,drivers/bluetooth,drivers/net/wireless,drivers/infiniband,drivers/isdn} 2>/dev/null || true
-  pack_ramdisks
+# Both rd_vendor.img and rd_init.img are unpacked into the same / rootfs by the kernel before /init starts.
+# If one partition overflows while the other has spare capacity, balance directories across the split.
+if (( ISZ > 8380416 && VSZ < 33488896 )); then
+  for d in "$WORK/split_init/usr/lib/modules/$KVER/kernel/drivers"/*; do
+    [[ -d "$d" ]] || continue
+    mkdir -p "$WORK/unpacked/usr/lib/modules/$KVER/kernel/drivers"
+    mv "$d" "$WORK/unpacked/usr/lib/modules/$KVER/kernel/drivers/"
+    pack_ramdisks
+    (( ISZ <= 8380416 || VSZ >= 33488896 )) && break
+  done
+elif (( VSZ > 33488896 && ISZ < 8380416 )); then
+  for rel in usr/lib/kbd usr/share usr/libexec; do
+    [[ -d "$WORK/unpacked/$rel" ]] || continue
+    mkdir -p "$(dirname "$WORK/split_init/$rel")"
+    mv "$WORK/unpacked/$rel" "$WORK/split_init/$rel"
+    pack_ramdisks
+    (( VSZ <= 33488896 || ISZ >= 8380416 )) && break
+  done
 fi
 
 echo "      rd_vendor.img: $VSZ bytes (limit 33488896)"

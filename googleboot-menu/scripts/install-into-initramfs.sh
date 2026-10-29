@@ -14,7 +14,7 @@ RD_DIR="${1:?Usage: $0 /path/to/unpacked_rd_vendor}"
 make -B -C "$SCRIPT_DIR" 2>/dev/null || [[ -x "$SCRIPT_DIR/bin/googleboot-menu" ]]
 
 mkdir -p "$RD_DIR/usr/local/bin" \
-         "$RD_DIR/boot/googlebook-theme/icons" \
+         "$RD_DIR/boot/googlebook-theme" \
          "$RD_DIR/etc/systemd/system/sysinit.target.wants" \
          "$RD_DIR/etc/systemd/system/initrd.target.wants"
 

@@ -962,9 +962,11 @@ static void render_ui(canvas_t *cv, const theme_config_t *t,
         /* Modal Title & Subtitle */
         draw_text_gs(cv, "Enter your passphrase", w * 0.5f, my + 122.0f * sf, 38.0f * sf, 1, t->text, 0.2f * sf);
 
-        char modal_sub[256];
+        char modal_sub[256], modal_os[64];
+        prettify_label(entries[selected].title, modal_os, sizeof(modal_os), false);
         const char *ldev = (entries[selected].luks_dev[0]) ? entries[selected].luks_dev : "/dev/nvme0n1p32";
-        snprintf(modal_sub, sizeof(modal_sub), "Unlock encrypted disk (%.120s) to start Fedora", ldev);
+        snprintf(modal_sub, sizeof(modal_sub), "Unlock encrypted disk (%.100s) to start %.40s",
+                 ldev, modal_os[0] ? modal_os : "Linux");
         draw_text_gs(cv, modal_sub, w * 0.5f, my + 174.0f * sf, 23.0f * sf, 1, t->subtext, 0.1f * sf);
 
         /* Material Outlined Password Input Field */
@@ -1087,7 +1089,7 @@ static int gpt_switch_slot(const char *disk_path, const char *mode, bool do_rebo
             break;
         }
     }
-    if (lba_size == 0) {
+    if (lba_size == 0 || hdr.header_size < sizeof(hdr) || hdr.header_size > lba_size) {
         fprintf(stderr, "Error: no valid GPT header found on %s\n", disk_path);
         close(fd);
         return 1;
@@ -1151,12 +1153,15 @@ static int gpt_switch_slot(const char *disk_path, const char *mode, bool do_rebo
         uint32_t pe_crc = (uint32_t)crc32(0L, entries_buf, (uInt)entries_bytes);
         hdr.part_entries_crc32 = pe_crc;
         hdr.header_crc32 = 0;
-        hdr.header_crc32 = (uint32_t)crc32(0L, (const Bytef *)&hdr, hdr.header_size);
+        hdr.header_crc32 = (uint32_t)crc32(0L, (const Bytef *)&hdr, sizeof(hdr));
 
         /* Write Primary GPT entries & header */
-        if (pwrite(fd, entries_buf, entries_bytes, (off_t)(hdr.part_entries_lba * lba_size)) < 0 ||
-            pwrite(fd, &hdr, sizeof(hdr), (off_t)(hdr.current_lba * lba_size)) < 0) {
+        if (pwrite(fd, entries_buf, entries_bytes, (off_t)(hdr.part_entries_lba * lba_size)) != (ssize_t)entries_bytes ||
+            pwrite(fd, &hdr, sizeof(hdr), (off_t)(hdr.current_lba * lba_size)) != (ssize_t)sizeof(hdr)) {
             perror("pwrite primary GPT");
+            free(entries_buf);
+            close(fd);
+            return 1;
         }
 
         /* Update Backup GPT if present */
@@ -1165,10 +1170,13 @@ static int gpt_switch_slot(const char *disk_path, const char *mode, bool do_rebo
             memcmp(bhdr.signature, "EFI PART", 8) == 0) {
             bhdr.part_entries_crc32 = pe_crc;
             bhdr.header_crc32 = 0;
-            bhdr.header_crc32 = (uint32_t)crc32(0L, (const Bytef *)&bhdr, bhdr.header_size);
-            if (pwrite(fd, entries_buf, entries_bytes, (off_t)(bhdr.part_entries_lba * lba_size)) < 0 ||
-                pwrite(fd, &bhdr, sizeof(bhdr), (off_t)(hdr.backup_lba * lba_size)) < 0) {
+            bhdr.header_crc32 = (uint32_t)crc32(0L, (const Bytef *)&bhdr, sizeof(bhdr));
+            if (pwrite(fd, entries_buf, entries_bytes, (off_t)(bhdr.part_entries_lba * lba_size)) != (ssize_t)entries_bytes ||
+                pwrite(fd, &bhdr, sizeof(bhdr), (off_t)(hdr.backup_lba * lba_size)) != (ssize_t)sizeof(bhdr)) {
                 perror("pwrite backup GPT");
+                free(entries_buf);
+                close(fd);
+                return 1;
             }
         }
         fsync(fd);
@@ -1455,10 +1463,18 @@ int main(int argc, char **argv) {
         }
     }
 
+    if (conn_id == 0 || mode.hdisplay < 2 || mode.vdisplay < 2) {
+        close(drm_fd);
+        return 1;
+    }
+
     struct drm_mode_create_dumb creq = {
         .width = mode.hdisplay, .height = mode.vdisplay, .bpp = 32
     };
-    ioctl(drm_fd, DRM_IOCTL_MODE_CREATE_DUMB, &creq);
+    if (ioctl(drm_fd, DRM_IOCTL_MODE_CREATE_DUMB, &creq) < 0 || creq.size == 0) {
+        close(drm_fd);
+        return 1;
+    }
 
     struct drm_mode_fb_cmd fb = {
         .width = mode.hdisplay, .height = mode.vdisplay,
@@ -1469,6 +1485,10 @@ int main(int argc, char **argv) {
     struct drm_mode_map_dumb mreq = { .handle = creq.handle };
     ioctl(drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &mreq);
     uint32_t *fb_map = mmap(0, creq.size, PROT_READ | PROT_WRITE, MAP_SHARED, drm_fd, mreq.offset);
+    if (fb_map == MAP_FAILED) {
+        close(drm_fd);
+        return 1;
+    }
 
     struct drm_mode_crtc crtc = {
         .crtc_id = crtc_id, .fb_id = fb.fb_id, .mode_valid = 1, .mode = mode,
@@ -1546,7 +1566,7 @@ int main(int argc, char **argv) {
                         if (ev.code == KEY_LEFT || ev.code == KEY_UP) selected = (selected - 1 + count) % count;
                         else if (ev.code == KEY_RIGHT || ev.code == KEY_DOWN || ev.code == KEY_TAB) selected = (selected + 1) % count;
                         else if (ev.code >= KEY_1 && ev.code <= KEY_9) { int idx = ev.code - KEY_1; if (idx < count) selected = idx; }
-                        else if (ev.code == KEY_R) { count = load_boot_entries(entries, MAX_ENTRIES, entries_file, false); }
+                        else if (ev.code == KEY_R) { count = load_boot_entries(entries, MAX_ENTRIES, entries_file, false); if (selected >= count) selected = count - 1; }
                         else if (ev.code == KEY_ENTER || ev.code == KEY_KPENTER) {
                             if (entries[selected].needs_luks) { luks_modal = true; luks_pass[0] = '\0'; status_msg[0] = '\0'; }
                             else goto do_boot;

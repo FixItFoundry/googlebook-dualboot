@@ -25,4 +25,4 @@ The one-shot setting depends on Android not marking Slot A successful again. Do 
 
 ## Android Updates
 
-Android OTA promotion and post-OTA Linux recovery are unsupported. An A/B OTA can replace Linux in Slot B. The updated restore tools require positive identification of Linux in B and refuse Android or unknown images; they never copy B over A or rewrite `super`. See the [recovery limitations and upgrade steps](../README.md#restoring-an-existing-linux-slot-b).
+An Android A/B OTA update writes the updated Android system into Slot B, replacing Linux. Use [`googlebook-restore-slotb`](../bin/googlebook-restore-slotb) (or the [Android restore app](../android-restore-app/README.md)) to stage Linux into Slot A when an unpromoted Android OTA is present in Slot B; on the next Linux boot, [`googlebook-sysroot-sync`](../bin/googlebook-sysroot-sync) promotes the verified Android OTA from Slot B to Slot A (`super` `LpMetadata` + `*_a` partitions) and restores Linux to Slot B. See [Restoring Linux After an Android System Update (OTA)](../README.md#restoring-linux-after-an-android-system-update-ota).

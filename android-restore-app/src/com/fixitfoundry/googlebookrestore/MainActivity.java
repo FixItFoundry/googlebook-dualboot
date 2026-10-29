@@ -664,19 +664,34 @@ public class MainActivity extends Activity {
     private void performSlotBRestore(FastbootTransport fb, String curSlot, String slotBOk, boolean promoteOta, boolean autoReboot) throws Exception {
         String[] roles = {"boot", "init_boot", "vendor_boot"};
         ImageSource[] images = new ImageSource[roles.length];
+        String bcMeta = "";
         for (int i = 0; i < roles.length; i++) {
             String srcName = roles[i] + "_b.img";
             images[i] = resolveImage(srcName);
             try (InputStream in = images[i].open()) {
-                BootImages.validate(roles[i] + "_b", in, images[i].size);
+                String meta = BootImages.validate(roles[i] + "_b", in, images[i].size);
+                if (!meta.isEmpty()) bcMeta = meta;
             }
         }
         String targetSlot = "b";
-        if (promoteOta && "b".equals(curSlot) && "yes".equals(slotBOk)) {
-            targetSlot = "a";
-            appendLog("[OTA-Safe] Detected completed OTA in Slot B (current-slot=b, slot-successful:b=yes).");
-            appendLog("[OTA-Safe] Staging Linux into Slot A so Linux promotes Android OTA (Slot B -> Slot A) on boot...");
-        } else {
+        if (promoteOta && "yes".equals(slotBOk) && !bcMeta.isEmpty()) {
+            String[] parts = bcMeta.split(":");
+            String devSha = "";
+            try {
+                fb.sendCommand("oem sha256:vendor_boot_b:" + parts[0] + ":" + parts[1]);
+                String info = fb.getLastInfo().toLowerCase(Locale.US);
+                if (info.matches("^[0-9a-f]{64}$")) devSha = info;
+            } catch (Exception ignored) {
+            }
+            if (!devSha.isEmpty() && devSha.equalsIgnoreCase(parts[2])) {
+                appendLog("[Restore] Verified via oem sha256 that Slot B already contains Linux; flashing Slot B directly...");
+            } else if ("b".equals(curSlot) || !devSha.isEmpty()) {
+                targetSlot = "a";
+                appendLog("[OTA-Safe] Detected unpromoted Android OTA in Slot B (slot-successful:b=yes).");
+                appendLog("[OTA-Safe] Staging Linux into Slot A so Linux promotes Android OTA (Slot B -> Slot A) on boot...");
+            }
+        }
+        if ("b".equals(targetSlot)) {
             appendLog("[Restore] Flashing Linux images directly to Slot B...");
         }
         for (int i = 0; i < roles.length; i++) {
@@ -877,8 +892,8 @@ public class MainActivity extends Activity {
     private interface FastbootTransport {
         String sendCommand(String cmd) throws IOException;
         String getVar(String name) throws IOException;
+        String getLastInfo();
         void flashPartition(String partition, InputStream data, long size) throws IOException;
-        byte[] fetch(long offset, int size) throws IOException;
         void close();
     }
 
@@ -887,6 +902,7 @@ public class MainActivity extends Activity {
         private final UsbInterface intf;
         private final UsbEndpoint epIn;
         private final UsbEndpoint epOut;
+        private String lastInfo = "";
 
         UsbFastbootTransport(UsbDeviceConnection conn, UsbInterface intf, UsbEndpoint epIn, UsbEndpoint epOut) {
             this.conn = conn;
@@ -896,7 +912,13 @@ public class MainActivity extends Activity {
         }
 
         @Override
+        public String getLastInfo() {
+            return lastInfo;
+        }
+
+        @Override
         public String sendCommand(String cmd) throws IOException {
+            lastInfo = "";
             byte[] outBytes = cmd.getBytes(StandardCharsets.UTF_8);
             int w = conn.bulkTransfer(epOut, outBytes, outBytes.length, 5000);
             if (w != outBytes.length) {
@@ -914,7 +936,8 @@ public class MainActivity extends Activity {
                 }
                 String s = new String(buf, 0, r, StandardCharsets.UTF_8);
                 if (s.startsWith("INFO")) {
-                    appendLog("  (bootloader) " + s.substring(4).trim());
+                    lastInfo = s.substring(4).trim();
+                    appendLog("  (bootloader) " + lastInfo);
                 } else if (s.startsWith("OKAY")) {
                     return s.substring(4);
                 } else if (s.startsWith("DATA")) {
@@ -954,21 +977,6 @@ public class MainActivity extends Activity {
         }
 
         @Override
-        public byte[] fetch(long offset, int size) throws IOException {
-            String response = sendCommand(String.format(Locale.US, "fetch:vendor_boot_b:0x%08x:0x%08x", offset, size));
-            if (!response.equals(String.format(Locale.US, "DATA%08x", size))) throw new IOException("Cannot verify Slot B: fetch unsupported or wrong size");
-            byte[] result = new byte[size];
-            int received = 0;
-            while (received < size) {
-                int n = conn.bulkTransfer(epIn, result, received, Math.min(16384, size - received), 60000);
-                if (n <= 0) throw new IOException("Incomplete Fastboot fetch");
-                received += n;
-            }
-            if (readResponse().startsWith("DATA")) throw new IOException("Unexpected fetch response");
-            return result;
-        }
-
-        @Override
         public void close() {
             try {
                 conn.releaseInterface(intf);
@@ -982,6 +990,7 @@ public class MainActivity extends Activity {
         private final Socket sock;
         private final DataInputStream in;
         private final DataOutputStream out;
+        private String lastInfo = "";
 
         TcpFastbootTransport(Socket sock) throws IOException {
             this.sock = sock;
@@ -995,6 +1004,11 @@ public class MainActivity extends Activity {
             if (!"FB01".equals(magic)) {
                 throw new IOException("Invalid TCP Fastboot handshake: " + magic);
             }
+        }
+
+        @Override
+        public String getLastInfo() {
+            return lastInfo;
         }
 
         private void writePacket(byte[] data, int len) throws IOException {
@@ -1013,7 +1027,8 @@ public class MainActivity extends Activity {
                 in.readFully(buf);
                 String s = new String(buf, StandardCharsets.UTF_8);
                 if (s.startsWith("INFO")) {
-                    appendLog("  (bootloader) " + s.substring(4).trim());
+                    lastInfo = s.substring(4).trim();
+                    appendLog("  (bootloader) " + lastInfo);
                 } else if (s.startsWith("OKAY")) {
                     return s.substring(4);
                 } else if (s.startsWith("DATA")) {
@@ -1026,6 +1041,7 @@ public class MainActivity extends Activity {
 
         @Override
         public String sendCommand(String cmd) throws IOException {
+            lastInfo = "";
             byte[] b = cmd.getBytes(StandardCharsets.UTF_8);
             writePacket(b, b.length);
             return readResponse();
@@ -1054,22 +1070,6 @@ public class MainActivity extends Activity {
             }
             readResponse();
             sendCommand("flash:" + partition);
-        }
-
-        @Override
-        public byte[] fetch(long offset, int size) throws IOException {
-            String response = sendCommand(String.format(Locale.US, "fetch:vendor_boot_b:0x%08x:0x%08x", offset, size));
-            if (!response.equals(String.format(Locale.US, "DATA%08x", size))) throw new IOException("Cannot verify Slot B: fetch unsupported or wrong size");
-            byte[] result = new byte[size];
-            int received = 0;
-            while (received < size) {
-                long packet = in.readLong();
-                if (packet <= 0 || packet > size - received) throw new IOException("Invalid fetch packet size");
-                in.readFully(result, received, (int) packet);
-                received += (int) packet;
-            }
-            if (readResponse().startsWith("DATA")) throw new IOException("Unexpected fetch response");
-            return result;
         }
 
         @Override

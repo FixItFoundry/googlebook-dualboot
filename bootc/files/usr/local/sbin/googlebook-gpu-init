@@ -23,6 +23,58 @@ for dev in glob.glob("/dev/input/by-path/*i8042-serio-0-event-kbd"):
 PY
 fi
 
+# The Vivaldi top row depends on 61-googlebook-moonstone.hwdb resolving. udev prefers
+# /etc/udev/hwdb.bin over /usr/lib/udev/hwdb.bin, and - this is the part that bites - if the
+# /etc copy exists but cannot be parsed, udev reports "Failed to recognize the format" and
+# gives up rather than falling back to the valid index in /usr. A single truncated file
+# therefore costs the whole keymap. One was observed in the field at exactly 105 bytes, a
+# header-sized stub left behind by a systemd-hwdb-update.service that died partway.
+#
+# The image ships only the /usr index on purpose (the build deletes /etc's and regenerates
+# /usr's with systemd-hwdb --usr update), so with an empty /etc/udev/hwdb.d the right repair
+# is to remove the /etc copy, not to rebuild it: udev then uses /usr's, and
+# systemd-hwdb-update.service skips entirely, since all of its OR'd conditions go false. That
+# stops it failing on every boot as well. Only when /etc/udev/hwdb.d holds local entries does
+# a rebuild make sense, because those exist nowhere else.
+MOONSTONE_Q="evdev:atkbd:dmi:bvnA:bvrB:bdC:br1:svnGoogle:pnMoonstone:pvr1"
+hwdb_touched=0
+
+# googlebook-sysroot-sync writes these from the initramfs, where no SELinux policy is loaded,
+# so they are created with no security.selinux xattr and land as unlabeled_t. A confined
+# domain cannot even getattr such a file, which surfaces as "Permission denied" for a process
+# running as root. Relabel here, which is the first moment the policy exists. Cheap and
+# idempotent: restorecon is a no-op once the labels are right.
+if command -v restorecon >/dev/null 2>&1 && selinuxenabled 2>/dev/null; then
+  restorecon -R /etc/udev/hwdb.d /etc/keyd 2>/dev/null || true
+  restorecon /etc/udev/hwdb.bin 2>/dev/null || true
+  restorecon -R /etc/systemd/system/googlebook-gpu-init.service \
+    /etc/systemd/system/multi-user.target.wants/googlebook-gpu-init.service \
+    /etc/systemd/system/graphical.target.wants/googlebook-gpu-init.service 2>/dev/null || true
+fi
+
+# With no local hwdb.d entries the /etc index is pure duplication of the one in /usr, and a
+# liability: systemd-hwdb-update.service has been seen failing with "Failed to write database
+# /etc/udev/hwdb.bin: Permission denied" and leaving a truncated stub, which udev then refuses
+# to parse and will not fall back from. Removing it keeps udev on the /usr index AND drops the
+# service out of its own conditions, so it stops running and cannot truncate anything again.
+if [ -f /etc/udev/hwdb.bin ] && [ -z "$(ls -A /etc/udev/hwdb.d 2>/dev/null)" ] \
+   && [ -f /usr/lib/udev/hwdb.bin ]; then
+  rm -f /etc/udev/hwdb.bin && hwdb_touched=1
+fi
+
+# Local hwdb.d entries exist nowhere else, so there a rebuild is the only correct repair.
+if ! systemd-hwdb query "$MOONSTONE_Q" 2>/dev/null | grep -q KEYBOARD_KEY_91; then
+  systemd-hwdb update 2>/dev/null || rm -f /etc/udev/hwdb.bin
+  hwdb_touched=1
+fi
+
+if [ "$hwdb_touched" = 1 ]; then
+  udevadm control --reload 2>/dev/null || true
+  udevadm trigger --subsystem-match=input --action=change 2>/dev/null || true
+  systemd-hwdb query "$MOONSTONE_Q" 2>/dev/null | grep -q KEYBOARD_KEY_91 \
+    || echo "googlebook-gpu-init: Moonstone hwdb entry still unresolved" >&2
+fi
+
 # xe.ko is blacklisted for the initramfs so googleboot-menu keeps DRM master on
 # simpledrm; load it here, once /usr/lib/firmware/xe is reachable on the real root.
 if [ ! -e /dev/dri/renderD128 ]; then

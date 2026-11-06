@@ -164,17 +164,47 @@ dracut has no `ostree` module (that comes from the image), so an initramfs built
 cannot act on `ostree=` no matter how correct the command line is.
 
 ```bash
+# head -1 takes whichever deployment sorts first, which is not necessarily the one the
+# default boot entry uses. Check the count before trusting it; with more than one, pick the
+# deployment deliberately (ostree admin status, or match the commit in ostree-<n>.conf).
+ls -d /ostree/deploy/*/deploy/*.0
 DEPLOY=$(ls -d /ostree/deploy/*/deploy/*.0 | head -1); echo "$DEPLOY"
+STATEROOT=$(dirname "$(dirname "$DEPLOY")")        # /ostree/deploy/<stateroot>
+
+# A bootc image ships an empty /var on purpose, and systemd-tmpfiles has not run in this
+# deployment yet, so the directories dracut and the toolkit expect are simply absent.
+# Create them before chrooting; the deployment is a plain directory tree until it boots.
+sudo mkdir -p "$STATEROOT/var/tmp" "$STATEROOT/var/roothome" "$STATEROOT/var/lib"
+sudo chmod 1777 "$STATEROOT/var/tmp"
+sudo chmod 0700 "$STATEROOT/var/roothome"
 
 for p in dev proc sys run; do
   sudo mount --rbind "/$p" "$DEPLOY/$p"
   sudo mount --make-rslave "$DEPLOY/$p"
 done
-sudo mount --bind /boot "$DEPLOY/boot"
-sudo mount --bind /     "$DEPLOY/sysroot"
+sudo mount --bind "$STATEROOT/var" "$DEPLOY/var"
+sudo mount --bind /boot            "$DEPLOY/boot"
+sudo mount --bind /                "$DEPLOY/sysroot"
 
 sudo chroot "$DEPLOY" /usr/local/bin/googlebook-pack-slotb
 ```
+
+**Relabel `/etc` before rebooting.** An in-place conversion can leave files in `/etc` with no
+SELinux label at all, and a confined domain cannot even `getattr` an `unlabeled_t` file — so
+the failure arrives as "Permission denied" from a process running as root, which is easy to
+misread as a mode or read-only problem:
+
+```bash
+sudo find /etc -context '*unlabeled_t*' 2>/dev/null   # see the extent
+sudo restorecon -Rv /etc
+```
+
+Observed on a converted machine: `/etc/udev/hwdb.bin` was `unlabeled_t` while `/etc/udev`
+itself was correctly `etc_t`, so `restorecon` without `-R` reported nothing to do. That one
+file took out `systemd-hwdb-update.service`, which failed four times in three seconds and
+left a 105-byte stub that udev then refused to parse — and udev does *not* fall back to
+`/usr/lib/udev/hwdb.bin` when the `/etc` copy is unparseable, so the entire Vivaldi top row
+went with it. `colord` was denied `read` on the same inode.
 
 Check the output. It should name the boot entry it chose, show a command line containing
 `ostree=`, and report both ramdisks inside their limits:
@@ -189,7 +219,7 @@ Check the output. It should name the boot entry it chose, show a command line co
 Then unmount, in reverse:
 
 ```bash
-sudo umount "$DEPLOY/sysroot" "$DEPLOY/boot"
+sudo umount "$DEPLOY/sysroot" "$DEPLOY/boot" "$DEPLOY/var"
 for p in run sys proc dev; do sudo umount -R "$DEPLOY/$p"; done
 sync
 ```
@@ -442,10 +472,204 @@ cat /proc/cmdline
 grep -h '^options' /boot/loader/entries/*.conf
 ```
 
-**`rd_vendor too large`.** The Slot B budget is 32 MiB for `vendor_boot_b` and 8 MiB for
-`init_boot_b`. Packages that pull firmware or storage drivers into a host-only initramfs can
-push it over. The omit list is in
-[`bootc/configs/usr/lib/dracut/dracut.conf.d/90-googlebook-slotb.conf`](../bootc/configs/usr/lib/dracut/dracut.conf.d/90-googlebook-slotb.conf).
+**Pack from the installed system, not from an Anaconda or live environment, when you have
+the choice.** `googlebook-pack-slotb` runs dracut with `--hostonly`, which probes the
+*running* system. In an Anaconda chroot that is the installer's hardware and its `/run`, not
+the machine as it will boot. Measured on one machine, the same packer and the same image
+produced 28,482,617 bytes from the installed Fedora Server and 32,092,814 bytes from the
+Anaconda chroot, with about 5 MB shifted between the two ramdisks — and the Anaconda build
+was the one that booted into the wrong OS. Use the installer environment only when the
+system cannot boot at all.
+
+**`bootloader-update.service` failed.** Expected, and masked by the image. It runs
+`bootupctl update`, which manages GRUB inside an EFI System Partition. This machine has
+neither — Depthcharge loads the kernel straight from the Android boot partitions that
+`googlebook-pack-slotb` writes — so bootupd has nothing to act on, fails on every boot, and
+buries real failures in `systemctl --failed`. It also logs a run of its own AVC denials
+around `/tmp` and `lsblk`. If it is still failing after an upgrade:
+
+```bash
+sudo systemctl mask bootloader-update.service
+```
+
+**`systemd-hwdb-update.service` failed, or `smoke-googlebook.sh` reports
+`FAIL Moonstone hwdb entry resolves`.** Both come from the same place. Check the label first:
+
+```bash
+sudo ausearch -m avc -ts boot | grep hwdb
+ls -lZ /etc/udev/hwdb.bin
+```
+
+The repair is the `restorecon -Rv /etc` above, plus removing the `/etc` index, which this
+image does not need and which is the specific file that has caused trouble:
+
+```bash
+sudo rm -f /etc/udev/hwdb.bin
+sudo udevadm control --reload
+sudo udevadm trigger --subsystem-match=input --action=change
+sudo systemctl reset-failed systemd-hwdb-update.service
+```
+
+Removing it is not a workaround but the intended steady state: the build generates and
+verifies `/usr/lib/udev/hwdb.bin`, udev prefers `/etc`'s copy only when it exists, and with
+`/etc/udev/hwdb.d/` empty all three of the service's OR'd conditions go false — so it is
+skipped rather than failing, and cannot leave a stub again. `googlebook-gpu-init` performs
+this on every boot, rebuilding instead of removing when `/etc/udev/hwdb.d/` does hold local
+entries, since those exist nowhere else.
+
+**Slot B boots, but into the pre-migration OS instead of the bootc deployment.** This one
+has no error message anywhere, which is what makes it confusing. `bootc install
+to-existing-root` leaves the previous installation's files in the subvolume — it adds
+`/ostree` beside them rather than replacing them — so an initramfs that switch-roots into
+the plain subvolume lands in a complete, working, *old* userspace. Nothing fails; you simply
+arrive somewhere else.
+
+You are in the OS the boot landed in, so `journalctl -b` covers the whole boot, initramfs
+included: journald flushes the initramfs ring buffer to the persistent journal after
+switch-root. Establish which root you got first:
+
+```bash
+cat /proc/cmdline
+findmnt -no SOURCE,FSTYPE / /usr
+test -f /run/ostree-booted && echo "ostree boot" || echo "NOT an ostree boot"
+bootc status 2>/dev/null | head -20
+```
+
+`/usr` of type `composefs` means the deployment; plain btrfs `subvol=root` with no
+`/run/ostree-booted` means the subvolume. Then read the initramfs phase, which
+`-o short-monotonic` makes easy to pick out (everything before roughly 5 s):
+
+```bash
+sudo journalctl -b -o short-monotonic | sed -n '1,250p'
+sudo journalctl -b | grep -iE 'googleboot|ostree-prepare-root|switch.root|composefs'
+ls -la /run/initramfs/
+```
+
+Stale boot entries are worth ruling out too — `googleboot-scan` reads
+`/boot/loader/entries`, and a migration can leave the old entries beside `ostree-1.conf`:
+
+```bash
+grep -H '' /boot/loader/entries/*.conf
+```
+
+**If the journal has nothing for that phase**, the packed command line carries `quiet rhgb`
+and the messages are gone. Repack verbose:
+
+```bash
+sudo GOOGLEBOOK_VERBOSE=1 chroot "$DEPLOY" /boot/googlebook-pack-slotb
+```
+
+That drops `quiet rhgb` and adds `rd.info systemd.show_status=1 systemd.log_level=info`. It
+needs a repack because the command line lives in `vendor_boot_b`'s `vendor_cmdline` field,
+not in a bootloader configuration — Depthcharge offers no prompt and there is no GRUB, so
+there is nothing to edit at boot time. `rd.shell` is deliberately *not* included: on a bootc
+image the root account is locked and the emergency shell cannot be opened.
+
+**`ostree-prepare-root: Failed to mount composefs: composefs: failed to mount: No such
+device`, then emergency mode.** Slot B reached switch-root — the framebuffer, the boot menu
+and the disk all worked — and failed one step later, mounting `/usr`.
+
+An ostree deployment mounts `/usr` as a composefs: an EROFS image composed through
+overlayfs. libcomposefs does that with `fsopen("erofs")`, and `fsopen(2)` returns `ENODEV`
+when the filesystem type is not registered. So "No such device" here does not mean a disk —
+it means the running kernel has no `erofs`, because `erofs.ko` was not in the Slot B
+initramfs. The package-based path never needed it, which is why this appears only after
+migrating to bootc.
+
+`/usr/lib/ostree/prepare-root.conf` in the base image is:
+
+```
+[composefs]
+enabled = yes
+```
+
+`yes`, not `maybe`, so there is no fallback to the classic bind-mount deployment, and
+`ostree-prepare-root` has no kernel-command-line override. The failure is fatal by design.
+
+The fix is to pin the modules rather than rely on probing — `90-googlebook-slotb.conf` now
+carries `erofs overlay loop` in `add_drivers`, and `googlebook-pack-slotb` refuses to pack an
+ostree deployment whose initramfs lacks `erofs` or `overlay`. Re-copy the packer and re-run:
+
+```bash
+sudo cp bin/googlebook-pack-slotb /boot/googlebook-pack-slotb
+sudo chroot "$DEPLOY" /boot/googlebook-pack-slotb
+```
+
+The `/etc/dracut.conf.d/90-googlebook-slotb.conf` write is unguarded, so this picks the new
+list up on its own. Cost is about 200 KB in `rd_init`.
+
+`50ostree` does call `instmods erofs overlay`, which is why this is not universal. Rather
+than work out why that did not take on one particular machine, the modules are now named
+along three independent paths, because each is cheap and the failure is unrecoverable in the
+field:
+
+- `add_drivers+=` — dracut's `instmods -c` batch at line 2124
+- `filesystems+=` — a *separate* `instmods -c` batch at line 2138, so a failure in the first
+  does not take the second with it (verified: with a deliberately unresolvable name in
+  `add_drivers`, the `filesystems+=` copies still land)
+- a pack-time refusal that lists the generated archive and checks both are in it
+
+**The packer also now checks dracut's exit status.** It previously ran
+
+```bash
+dracut ... "$W/initramfs.img" >/dev/null
+```
+
+with no `||`, so a dracut that failed outright left a missing or truncated image and the pack
+continued regardless. That is worth knowing when reading a "missing composefs module(s)"
+error: if the listing came back empty, *every* module looks absent, and the real fault is
+further up. The failure path now dumps the dracut log and runs a direct `dracut-install`
+probe so the two cases are distinguishable.
+
+**Emergency mode is useless on a bootc image.** `Cannot open access to console, the root
+account is locked` — `sulogin` has nothing to authenticate against, because the base image
+ships no root password. Plan on reading the failure from the screen, not from a shell.
+Nothing is written to `/boot` either: `/run/initramfs/rdsosreport.txt` dies with the boot.
+If a future failure needs more than the console shows, set a root password in the image
+(`bootc/install-googlebook-layer.sh`) before packing, and remove it afterwards.
+
+**`rd_vendor too large`, or an `initramfs size:` far above the Fedora Server figure.** The
+Slot B budget is 32 MiB for `vendor_boot_b` and 8 MiB for `init_boot_b`. A package-based
+Fedora Server pack came out at 32.0 MB, splitting to 24.5 + 6.0; an untrimmed bootc pack on
+the same machine came out at **64.3 MB**, which does not fit.
+
+The cause is not the Googlebook layer but fedora-bootc's own dracut drop-ins, which build a
+deliberately generic initramfs: `30-bootc-standard.conf` adds `lvm`, `crypt` and `fips`,
+`22-bootc-generic.conf` adds `virtiofs`, and `49-bootc-tpm2-tss.conf` plus
+`50-bootc-clevis.conf` add the entire TPM2 and Clevis unlock stack. None of it applies to a
+local NVMe Btrfs root.
+[`92-googlebook-bootc.conf`](../bootc/configs/usr/lib/dracut/dracut.conf.d/92-googlebook-bootc.conf)
+omits them while keeping `ostree`, `bootc`, `btrfs`, `dm`, `crypt` and
+`systemd-cryptsetup`. Measured on the machine, that takes the pack from 64.3 MB to
+**28.6 MB** — below the 32.0 MB a package-based Fedora Server pack produced on the same
+hardware, because the omit list drops more than bootc adds:
+
+```
+[googlebook-slotb] initramfs size: 28582951 bytes
+[googlebook-slotb] rd_vendor: 19484539 bytes (limit 33488896), rd_init: 7590459 bytes (limit 8380416)
+```
+
+`rd_vendor` lands at 58% of budget, `rd_init` at **91%** — about 790 KiB spare. `rd_init`
+holds the early-userspace archive, so anything added to `add_dracutmodules`, a new
+`/etc/crypttab` entry, or a base image that grows `systemd` will land there first. If a
+later pack reports `rd_init too large`, that margin is where it went.
+
+**The filename is load-bearing.** `googlebook-pack-slotb` writes its own
+`/etc/dracut.conf.d/90-googlebook-slotb.conf`, and dracut resolves `conf.d` files by
+basename with `/etc` winning over `/usr/lib` — verified, not assumed. Anything added to a
+`90-` or `91-` file in the image is therefore silently discarded at pack time. Use a
+basename the packer never writes.
+
+To apply the omissions to a deployment packed with an older image, write the file into the
+deployment's `/etc`, which is writable even though `/usr` is not:
+
+```bash
+sudo cp bootc/configs/usr/lib/dracut/dracut.conf.d/92-googlebook-bootc.conf \
+        "$DEPLOY/etc/dracut.conf.d/"
+```
+
+The driver-level omit list is separate and lives in
+[`90-googlebook-slotb.conf`](../bootc/configs/usr/lib/dracut/dracut.conf.d/90-googlebook-slotb.conf).
 
 For reference, the `ostree` and `bootc` dracut modules that bootc adds on top of a
 package-based initramfs come to **1.26 MiB uncompressed**, almost all of it
@@ -458,16 +682,34 @@ package-based initramfs come to **1.26 MiB uncompressed**, almost all of it
 | `usr/lib/ostree/ostree-prepare-root` | 57,184 |
 | service units and `prepare-root.conf` | ~1,800 |
 
-That lands in `rd_vendor`, which had roughly 8.6 MiB of headroom on the Fedora Server pack
-(24,472,219 of 33,488,896 bytes), so it fits — but the figure above is an uncompressed
-measurement taken in a container, not a packed size from the machine. Check the packer's own
-`rd_vendor:` / `rd_init:` line, which is authoritative.
+That lands in `rd_vendor`, which is the roomier of the two — confirmed on the machine at
+19,484,539 of 33,488,896 bytes with the omit list applied.
 
-**dracut fails with `Invalid tmpdir '/var/tmp'` or `dracut-install: ERROR: installing
-'/root'`.** You are running the packer inside `podman run` rather than on a deployment. A
-bootc image must ship an empty `/var`, and `systemd-tmpfiles` recreates `/var/tmp` (`q
-/var/tmp 1777 root root 30d`) and `/var/roothome` (`d /var/roothome 0700 root root -`) only
-on a real boot. Test on the machine.
+**dracut fails with `Invalid tmpdir '/var/tmp'`.** A bootc image ships an empty `/var`,
+and `systemd-tmpfiles` creates `/var/tmp` (`q /var/tmp 1777 root root 30d`) and
+`/var/roothome` (`d /var/roothome 0700 root root -`) only on a real boot — so neither
+exists inside a deployment chroot or a container. The packer now passes `--tmpdir` to
+dracut and no longer depends on `/var/tmp` at all; on an older copy of the packer, either
+create the directories as in Path A step 3 or run it as:
+
+```bash
+sudo chroot "$DEPLOY" env TMPDIR=/tmp /usr/local/bin/googlebook-pack-slotb
+```
+
+**`ERROR: missing coreboot framebuffer module(s)`.** The packer refuses to write a Slot B
+image that cannot drive the panel, because that failure gives you no display, no console
+and no log. On an image-based system it almost always means the deployed image is the
+*base* (`bootc-image-laptop`) rather than the Googlebook layer built from
+`bootc/Containerfile` — the base carries no `coreboot_table.ko`. Check what is deployed:
+
+```bash
+DEPLOY=$(ls -d /ostree/deploy/*/deploy/*.0 | head -1)
+cat "${DEPLOY}.origin" | grep -i image
+ls "$DEPLOY"/usr/lib/modules/*/extra/
+```
+
+`GOOGLEBOOK_ALLOW_NO_FB=1` overrides the refusal, but only do that if you have another way
+in — it will boot blind.
 
 **`googlebook-slotb-sync` never fires.** It is conditioned on `/run/ostree-booted`, so it is
 inert on a package-based system by design. On a deployment, check both units:

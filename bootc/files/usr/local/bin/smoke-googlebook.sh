@@ -59,6 +59,19 @@ check "Slot B dracut conf present" \
   test -f /usr/lib/dracut/dracut.conf.d/90-googlebook-slotb.conf
 check "sensor dracut conf present" \
   test -f /usr/lib/dracut/dracut.conf.d/91-googlebook-sensors.conf
+# composefs is how an ostree deployment mounts /usr. Without erofs and overlay in the
+# initramfs, ostree-prepare-root fails with ENODEV and Slot B never reaches switch-root.
+check "composefs modules pinned in add_drivers" \
+  grep -qE 'add_drivers.*erofs.*overlay' /usr/lib/dracut/dracut.conf.d/90-googlebook-slotb.conf
+check "composefs modules pinned in filesystems (independent instmods batch)" \
+  grep -qE 'filesystems.*erofs.*overlay' /usr/lib/dracut/dracut.conf.d/90-googlebook-slotb.conf
+# Must be a basename the packer does not also write into /etc, or dracut shadows it.
+check "bootc dracut omit list present" \
+  test -f /usr/lib/dracut/dracut.conf.d/92-googlebook-bootc.conf
+check "omit list is not shadowed by a packer-written /etc copy" \
+  sh -c '! test -f /etc/dracut.conf.d/92-googlebook-bootc.conf'
+check "clevis is omitted" \
+  grep -q 'clevis' /usr/lib/dracut/dracut.conf.d/92-googlebook-bootc.conf
 check "coreboot framebuffer autoload present" \
   test -f /usr/lib/modules-load.d/googlebook-coreboot-fb.conf
 check "staged Xe2 modprobe rules present" \
@@ -87,6 +100,18 @@ check "googlebook-slotb-sync.path enabled" \
   systemctl is-enabled googlebook-slotb-sync.path
 check "googlebook-gpu-init.service enabled" \
   systemctl is-enabled googlebook-gpu-init.service
+# bootupd updates GRUB in an ESP. There is no ESP and no GRUB on a Depthcharge machine, so
+# it fails every boot and buries real failures in `systemctl --failed`.
+check "bootloader-update.service masked (no ESP on this machine)" \
+  sh -c '[ "$(systemctl is-enabled bootloader-update.service 2>&1)" = masked ]'
+# gnome-software has no bootc plugin and falls back to rpm-ostreed, which prompts for a
+# password at every login and refreshes every repo in /etc/yum.repos.d. The OS is updated with
+# bootc, so Software keeps only its application and firmware roles.
+check "gnome-software package backends removed" \
+  sh -c '! ls /usr/lib64/gnome-software/plugins-*/libgs_plugin_dnf5.so \
+           /usr/lib64/gnome-software/plugins-*/libgs_plugin_rpm-ostree.so >/dev/null 2>&1'
+check "gnome-software flatpak backend kept" \
+  sh -c 'ls /usr/lib64/gnome-software/plugins-*/libgs_plugin_flatpak.so >/dev/null 2>&1'
 
 # --- runtime-only: these need a real deployment, not a container -------------------------
 BOOTIMAGE=$(bootc status --booted --format json 2>/dev/null | jq -r '.spec.image // "null"' || echo null)
@@ -98,6 +123,29 @@ else
   check "an ostree boot entry carries ostree=" \
     sh -c 'grep -qs "ostree=" /boot/loader/entries/*.conf'
   check "slotb-sync state directory" test -d /var/lib/googlebook
+  # An in-place migration can leave files in /etc with no SELinux label. Confined domains
+  # cannot even getattr an unlabeled_t file, so this surfaces as "Permission denied" from
+  # processes running as root and is easy to misread. Observed on a converted machine:
+  # /etc/udev/hwdb.bin unlabeled, which broke systemd-hwdb-update.service (leaving a
+  # truncated index that udev refuses to parse, costing the whole Vivaldi keymap) and
+  # colord's read of the same inode. Fix with: restorecon -Rv /etc
+  if command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled 2>/dev/null; then
+    unlabeled=$(find /etc -context '*unlabeled_t*' 2>/dev/null | head -20)
+    if [ -z "$unlabeled" ]; then
+      echo "  ok   no unlabeled files in /etc"
+    else
+      echo "  FAIL unlabeled files in /etc (run: restorecon -Rv /etc):"
+      echo "$unlabeled" | sed 's/^/         /'
+      fail=1
+    fi
+  fi
+  # /etc/udev/hwdb.bin is redundant here - the image keeps the index in /usr - and is the one
+  # file that has actually caused this. Its absence also drops systemd-hwdb-update.service
+  # out of its own OR'd conditions, so it is skipped rather than failing every boot.
+  check "no redundant /etc/udev/hwdb.bin shadowing the /usr index" \
+    sh -c '! test -f /etc/udev/hwdb.bin || test -n "$(ls -A /etc/udev/hwdb.d 2>/dev/null)"'
+  check "systemd-hwdb-update.service is not failed" \
+    sh -c '[ "$(systemctl is-failed systemd-hwdb-update.service 2>&1)" != failed ]'
 fi
 
 if [ "$fail" -ne 0 ]; then

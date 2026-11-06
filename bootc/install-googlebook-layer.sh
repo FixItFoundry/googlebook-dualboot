@@ -77,6 +77,40 @@ systemd-hwdb --usr --root=/ query "evdev:atkbd:dmi:bvnA:bvrB:bdC:br1:svnGoogle:p
   || { echo "FATAL: Moonstone hwdb entry does not resolve after update" >&2; exit 1; }
 
 systemctl enable googlebook-gpu-init.service googlebook-slotb-sync.path
+
+# bootupd manages GRUB inside an EFI System Partition. This machine has no ESP and no GRUB:
+# Depthcharge loads the kernel directly from the Android boot partitions, which is what
+# googlebook-pack-slotb writes. bootupctl update therefore has nothing to act on and fails
+# on every boot, which is noise that hides real failures in `systemctl --failed`. Masking is
+# the honest state - there is no bootloader here for it to update.
+# Masked in /usr, not via `systemctl mask`, which writes /etc/systemd/system/<unit> -> /dev/null.
+# This is the image's decision about this hardware, not local administrator state, so it
+# belongs in /usr where it is carried by the image rather than by ostree's 3-way /etc merge.
+# systemd treats a unit symlinked to /dev/null in either location as masked; an administrator
+# can still override it from /etc. Verified: is-enabled reports "masked" with /etc untouched.
+ln -sf /dev/null /usr/lib/systemd/system/bootloader-update.service
+
+# gnome-software cannot manage this system, and trying costs a polkit prompt on every login.
+# It ships no bootc plugin, so it reaches for rpm-ostreed instead: observed in the field as
+#   rpm-ostree[...]: Initiated txn RefreshMd for client(id:gnome-software ... uid:1000)
+# followed by metadata downloads from every repo in /etc/yum.repos.d - the 1Password repo and
+# the PyCharm COPR included, which exist for build-time installs and have no business being
+# fetched at login. Worse than the nuisance: the step past RefreshMd is package layering,
+# which does not mix with bootc. The OS is updated with `bootc upgrade`, after which
+# googlebook-slotb-sync.path repacks Slot B.
+#
+# Removing both package backends leaves appstream, flatpak and fwupd, so Software still
+# installs applications and still reports firmware updates - which is the role it should have
+# here. Globbed because the directory carries gnome-software's plugin ABI version
+# (plugins-23 at the time of writing) and that moves with the base image.
+rm -f /usr/lib64/gnome-software/plugins-*/libgs_plugin_dnf5.so \
+      /usr/lib64/gnome-software/plugins-*/libgs_plugin_rpm-ostree.so
+# Assert the ones that give Software its remaining purpose are still there, so a base image
+# that reorganises the plugin directory fails the build instead of shipping a useless GUI.
+for want in appstream flatpak fwupd; do
+  ls /usr/lib64/gnome-software/plugins-*/libgs_plugin_${want}.so >/dev/null \
+    || { echo "FATAL: gnome-software $want plugin missing after prune" >&2; exit 1; }
+done
 systemctl set-default graphical.target
 
 # /var must be empty in a bootc image; tmpfiles.d/googlebook.conf recreates what we need.

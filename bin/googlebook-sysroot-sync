@@ -15,6 +15,9 @@ mount -o remount,rw /sysroot 2>/dev/null || true
 # the container image there, so detect the case and skip those copies - otherwise the
 # `|| exit 1` guards below abort the sync before it reaches the /etc work, which is
 # writable on every layout and still needs doing.
+SYSROOT_OSTREE=0
+[ -d /sysroot/ostree ] && SYSROOT_OSTREE=1
+
 SYSROOT_USR_RW=1
 if [ -d /sysroot/ostree ] || ! (: >/sysroot/usr/.googlebook-rw-probe) 2>/dev/null; then
   SYSROOT_USR_RW=0
@@ -103,7 +106,14 @@ fi
 rm -f /sysroot/etc/udev/rules.d/99-googlebook-slotb.rules /sysroot/etc/sudoers.d/googlebook-slotb
 
 # 3. Install Moonstone Vivaldi top-row keyboard hwdb and keyd mappings
-mkdir -p /sysroot/etc/keyd /sysroot/etc/udev/hwdb.d
+mkdir -p /sysroot/etc/keyd
+# On an ostree/bootc deployment the image already ships this at
+# /usr/lib/udev/hwdb.d/61-googlebook-moonstone.hwdb and the build verifies that it resolves,
+# so an /etc copy is pure duplication - and harmful duplication: it is written here without a
+# SELinux label, and it keeps /etc/udev/hwdb.d non-empty, which is one of the OR'd conditions
+# that keeps systemd-hwdb-update.service running (and failing) on every boot.
+if [ "$SYSROOT_OSTREE" = 0 ]; then
+mkdir -p /sysroot/etc/udev/hwdb.d
 cat > /sysroot/etc/udev/hwdb.d/61-googlebook-moonstone.hwdb << 'HWDBEOF'
 evdev:atkbd:dmi:bvn*:bvr*:bd*:svnGoogle:pnMoonstone*
  KEYBOARD_KEY_91=f11
@@ -111,7 +121,18 @@ evdev:atkbd:dmi:bvn*:bvr*:bd*:svnGoogle:pnMoonstone*
  KEYBOARD_KEY_a7=playpause
  KEYBOARD_KEY_a9=prog1
 HWDBEOF
-chroot /sysroot systemd-hwdb update 2>/dev/null || true
+fi
+# Deliberately NOT running "chroot /sysroot systemd-hwdb update" here. This script runs in
+# the initramfs, where the SELinux policy is not loaded, so anything created now gets no
+# security.selinux xattr and lands as unlabeled_t. systemd-hwdb writes its index through a
+# temporary file and a rename, so it produces a NEW, unlabelled inode every time - and a
+# confined domain cannot even getattr an unlabeled_t file. Observed consequence: a 105-byte
+# /etc/udev/hwdb.bin that systemd-hwdb-update.service then failed to replace ("Permission
+# denied", as root), that udev refused to parse, and that udev would not fall back from -
+# costing the entire Vivaldi top row, plus a denial on colord reading the same inode.
+#
+# googlebook-gpu-init rebuilds and relabels the index after switch-root, with the policy
+# loaded, which is the only point at which either can be done correctly.
 
 cat > /sysroot/etc/keyd/cros.conf << 'KEYDEOF'
 [ids]
@@ -195,6 +216,10 @@ if [ -f /sysroot/usr/local/bin/googlebook-restore-slotb ]; then
   [ "$MOUNTED_DEV" = 1 ] && umount /sysroot/dev 2>/dev/null || true
 fi
 
+# Same reasoning as the hwdb file above: the bootc image ships this unit in
+# /usr/lib/systemd/system and enables it at build time, so writing an unlabelled /etc copy
+# from the initramfs only shadows a correct unit with a broken one.
+if [ "$SYSROOT_OSTREE" = 0 ]; then
 mkdir -p /sysroot/etc/systemd/system/multi-user.target.wants /sysroot/etc/systemd/system/graphical.target.wants
 cat > /sysroot/etc/systemd/system/googlebook-gpu-init.service << 'SVCEOF'
 [Unit]
@@ -213,5 +238,6 @@ SVCEOF
 
 ln -sf ../googlebook-gpu-init.service /sysroot/etc/systemd/system/multi-user.target.wants/googlebook-gpu-init.service
 ln -sf ../googlebook-gpu-init.service /sysroot/etc/systemd/system/graphical.target.wants/googlebook-gpu-init.service
+fi
 
 exit 0

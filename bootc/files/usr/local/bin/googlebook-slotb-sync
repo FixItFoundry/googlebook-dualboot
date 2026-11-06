@@ -1,0 +1,57 @@
+#!/bin/bash
+# googlebook-slotb-sync
+# Keeps the Acer Googlebook 14 (Moonstone) Slot B boot images in step with the ostree
+# deployment that will boot next.
+#
+# On a package-based Fedora, /etc/kernel/install.d/95-googlebook-slotb.install re-packs
+# Slot B whenever a kernel RPM lands. A bootc system never installs a kernel that way:
+# `bootc upgrade` swaps the whole /usr tree and writes a new BLS entry under
+# /boot/loader/entries, so the trigger has to be that directory changing instead. The
+# matching .path unit watches it; this script decides whether anything actually needs
+# re-packing and, if so, calls the packer.
+#
+# Usage: googlebook-slotb-sync [--force]
+set -euo pipefail
+
+log() { echo "[googlebook-slotb-sync] $*"; }
+
+STAMP_DIR=/var/lib/googlebook
+STAMP="$STAMP_DIR/slotb.stamp"
+PACKER=/usr/local/bin/googlebook-pack-slotb
+
+[[ -x "$PACKER" ]] || { log "packer missing at $PACKER"; exit 1; }
+
+# Fingerprint every input that changes the bytes we would write into Slot B: the boot
+# entries themselves (they carry root=, ostree= and the kernel path) and the set of
+# per-bootcsum kernel directories ostree keeps under /boot/ostree. Hashing all of them
+# rather than trying to work out which entry is the default keeps this agnostic to
+# ostree's entry-numbering scheme, and errs toward re-packing.
+fingerprint() {
+  {
+    cat /boot/loader/entries/*.conf 2>/dev/null || true
+    ls -1 /boot/ostree 2>/dev/null || true
+  } | sha256sum | awk '{print $1}'
+}
+
+FORCE=0
+[[ "${1:-}" == "--force" ]] && FORCE=1
+
+CUR=$(fingerprint)
+if [[ -z "$CUR" || "$CUR" == "$(printf '' | sha256sum | awk '{print $1}')" ]]; then
+  log "no ostree boot entries under /boot; nothing to pack"
+  exit 0
+fi
+
+if (( ! FORCE )) && [[ -f "$STAMP" ]] && [[ "$(cat "$STAMP")" == "$CUR" ]]; then
+  log "Slot B already matches the current boot entries; nothing to do"
+  exit 0
+fi
+
+log "boot entries changed (or first run); re-packing Slot B"
+# Write the stamp only after the packer has verified its own block writes, so an
+# interrupted or failed pack is retried on the next boot rather than being recorded as
+# done. Slot B is the only way into Linux on this machine.
+"$PACKER"
+mkdir -p "$STAMP_DIR"
+printf '%s\n' "$CUR" > "$STAMP"
+log "Slot B refreshed"

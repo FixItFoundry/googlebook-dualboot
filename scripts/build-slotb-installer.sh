@@ -55,6 +55,12 @@ if [[ -f "$ISO_DIR/images/pxeboot/vmlinuz" && -f "$ISO_DIR/images/pxeboot/initrd
   else
     MODE="fedora-stage2"
   fi
+elif [[ -f "$ISO_DIR/boot/x86_64/loader/linux" && -f "$ISO_DIR/boot/x86_64/loader/initrd" ]]; then
+  # Fedora 42+ Live layout (grub2 + boot/x86_64/loader/) used by Workstation and the spins.
+  # Same kernel and dracut dmsquash-live payload as the images/pxeboot layout, just relocated.
+  VMLINUZ="$ISO_DIR/boot/x86_64/loader/linux"
+  INITRD="$ISO_DIR/boot/x86_64/loader/initrd"
+  MODE="fedora-live"
 elif VMLINUZ=$(first_file "$ISO_DIR"/arch/boot/x86_64/vmlinuz*) && INITRD=$(first_file "$ISO_DIR"/arch/boot/x86_64/initramfs*.img); then
   MODE="arch-live"
 elif VMLINUZ=$(first_file "$ISO_DIR"/casper/vmlinuz*) && INITRD=$(first_file "$ISO_DIR"/casper/initrd*); then
@@ -110,14 +116,28 @@ PY
   elif [[ -x /usr/lib/dracut/skipcpio ]]; then
     /usr/lib/dracut/skipcpio "$img" > "$WORK/stripped.img" 2>/dev/null && [[ -s "$WORK/stripped.img" ]] && stream="$WORK/stripped.img"
   fi
-  (cd "$dst" && (
-    zstd -d < "$stream" 2>/dev/null | cpio -idm --quiet 2>/dev/null ||
-    xz -dc "$stream" 2>/dev/null | cpio -idm --quiet 2>/dev/null ||
-    lz4 -dc "$stream" 2>/dev/null | cpio -idm --quiet 2>/dev/null ||
-    gzip -dc "$stream" 2>/dev/null | cpio -idm --quiet 2>/dev/null ||
-    zstd -d < "$img" 2>/dev/null | cpio -idm --quiet 2>/dev/null ||
-    xz -dc "$img" 2>/dev/null | cpio -idm --quiet
-  ))
+  # cpio exits non-zero when it cannot mknod the character devices some initramfs images ship
+  # (dev/console, dev/null, dev/kmsg, dev/random, dev/urandom - Fedora Live carries them, the
+  # Server stage2 initrd does not), which an unprivileged build cannot create. The extraction
+  # itself still succeeds, and the nodes are not needed because systemd mounts devtmpfs over
+  # /dev early in Stage 1. So decide success by what landed on disk, not by cpio's status.
+  local src fmt
+  for src in "$stream" "$img"; do
+    for fmt in zstd xz lz4 gzip cat; do
+      [[ -e "$dst/init" || -d "$dst/usr" ]] && break 2
+      case "$fmt" in
+        zstd) zstd -dc "$src" 2>/dev/null ;;
+        xz) xz -dc "$src" 2>/dev/null ;;
+        lz4) lz4 -dc "$src" 2>/dev/null ;;
+        gzip) gzip -dc "$src" 2>/dev/null ;;
+        cat) cat "$src" ;;
+      esac | (cd "$dst" && cpio -idm --quiet 2>/dev/null) || true
+    done
+  done
+  if [[ ! -e "$dst/init" && ! -d "$dst/usr" ]]; then
+    echo "Error: unable to unpack initrd $img (unknown container format)" >&2
+    return 1
+  fi
 }
 unpack_initrd "$INITRD" "$WORK/unpacked"
 
@@ -164,6 +184,12 @@ for fwdir in "$WORK/unpacked/usr/lib/firmware" "$WORK/unpacked/lib/firmware"; do
     find "$fwdir/intel" -mindepth 1 -maxdepth 1 ! -name 'ish' -exec rm -rf {} + 2>/dev/null || true
   fi
 done
+
+# Early-CPIO CPU microcode. Fedora Live images prepend an uncompressed cpio segment holding
+# GenuineIntel.bin (~16 MiB of microcode for every Intel part), which alone overruns the 32 MiB
+# vendor_boot_b budget. Coreboot/FSP applies Panther Lake microcode before Linux starts on
+# Moonstone, so the initramfs copy buys nothing in the Slot B installer environment.
+rm -rf "$WORK/unpacked/kernel/x86/microcode" 2>/dev/null || true
 
 # Prune Stage 1 userspace bloat not needed before mounting Stage 2 / Live squashfs
 rm -rf "$WORK/unpacked/usr/lib64/python3"* \
@@ -600,6 +626,11 @@ esac
 RD_DRIVER_PRE="coreboot_table,framebuffer-coreboot,loop,squashfs,overlay"
 if [[ "$SOURCE" == http://* || "$SOURCE" == https://* ]]; then
   RD_DRIVER_PRE="${RD_DRIVER_PRE},mii,usbnet,r8152,asix,ax88179_178a,cdc_ether,cdc_ncm,rndis_host,aqc111,smsc95xx,smsc75xx,lan78xx"
+else
+  # Booting the live image from a USB stick reads it through usb-storage. The same unreliable
+  # on-demand autoload that affects loop and the USB NIC applies here, so bring the storage
+  # and ISO filesystem path up front as well.
+  RD_DRIVER_PRE="${RD_DRIVER_PRE},usb_storage,uas,sd_mod,isofs"
 fi
 
 CMDLINE="${STAGE_ARGS} rd.driver.pre=${RD_DRIVER_PRE} clk_ignore_unused ${GPU_ARGS} console=tty0 bootconfig ${EXTRA_CMDLINE}"

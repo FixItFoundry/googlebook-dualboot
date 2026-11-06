@@ -1,0 +1,13 @@
+# Keep the bootc build context small; these are either generated artifacts or
+# debugging captures, never image content.
+.git
+*.img
+*.iso
+*.jpg
+*.jpeg
+gpt-pre-shrink.bin
+slotb-installer*/
+tmp/
+__pycache__/
+.github
+android-restore-app/

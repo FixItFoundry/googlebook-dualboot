@@ -1,0 +1,135 @@
+name: Build Googlebook image
+
+# Rebuilds ghcr.io/<owner>/bootc-image-googlebook whenever anything the image is built
+# from changes. The path list below mirrors what bootc/Containerfile actually COPYs, so
+# adding a COPY there means adding a path here.
+#
+# Not covered: a rebuild of the BASE image (ghcr.io/<owner>/bootc-image-laptop:main), which
+# lives in another repository. When the base moves - especially when its kernel moves -
+# this image needs rebuilding too, or its out-of-tree modules stop matching. Trigger that
+# by hand with workflow_dispatch, or wire a repository_dispatch from the base repo's
+# workflow. smoke-googlebook.sh fails loudly on a vermagic mismatch either way.
+
+on:
+  pull_request:
+    paths:
+      - bootc/**
+      - bin/**
+      - coreboot-mods/**
+      - sensor-mods/**
+      - audio-mods/**
+      - googleboot-menu/**
+      # docs/ is genuinely a source: bootc/Containerfile COPYs it to
+      # /usr/local/share/googlebook-dualboot/docs, which the slotb-sync unit points its
+      # Documentation= at. Drop this line if rebuilding ~7.6 GB for a prose fix is not
+      # worth it, and drop the COPY with it.
+      - docs/**
+      - .containerignore
+      - .github/workflows/googlebook-image.yml
+  push:
+    branches: [main]
+    paths:
+      - bootc/**
+      - bin/**
+      - coreboot-mods/**
+      - sensor-mods/**
+      - audio-mods/**
+      - googleboot-menu/**
+      - docs/**
+      - .containerignore
+      - .github/workflows/googlebook-image.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # amd64 only, and not just "for now": the Googlebook 14 is a Panther Lake x86_64
+    # machine, and the whole point of this layer - the out-of-tree coreboot framebuffer
+    # modules and the googleboot-menu binary - is compiled for that kernel. There is no
+    # arm64 target, so there is no build matrix and no multi-architecture manifest job.
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman
+
+      # This image needs more room than the laptop layer it builds on: the base is ~7.6 GB
+      # and the build has two stages off it, the first of which unpacks a full kernel
+      # source tree for kernel-devel. Drop the preinstalled toolchains and put both
+      # podman's storage and its blob staging on /mnt, the big ephemeral disk.
+      - name: Make room for the image
+        run: |
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /usr/local/.ghcup \
+            /usr/local/share/boost \
+            /opt/ghc \
+            /opt/hostedtoolcache
+          if [ -d /mnt ]; then
+            sudo mkdir -p /mnt/podman/storage /mnt/podman/tmp
+            sudo chown "$(id -u):$(id -g)" /mnt/podman/storage /mnt/podman/tmp
+            mkdir -p "$HOME/.local/share/containers"
+            sudo mount --bind \
+              /mnt/podman/storage "$HOME/.local/share/containers"
+            sudo chown "$(id -u):$(id -g)" "$HOME/.local/share/containers"
+            echo "TMPDIR=/mnt/podman/tmp" >> "$GITHUB_ENV"
+          fi
+          df -h / /mnt 2>&1 || true
+
+      - name: Set image name
+        run: |
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "IMAGE=ghcr.io/${OWNER}/bootc-image-googlebook" \
+            >> "$GITHUB_ENV"
+          echo "BASE_IMAGE=ghcr.io/${OWNER}/bootc-image-laptop:main" \
+            >> "$GITHUB_ENV"
+
+      # log in before the build, so it can pull the base image
+      - name: Authenticate to GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$GH_TOKEN" |
+            podman login ghcr.io \
+              --username "$GITHUB_ACTOR" \
+              --password-stdin
+
+      # The build context is the repository root, not bootc/: the layer needs the
+      # out-of-tree module sources and googleboot-menu that live beside it.
+      # .containerignore keeps the captures and generated artifacts out.
+      - name: Build
+        run: |
+          podman build \
+            --platform linux/amd64 \
+            --file bootc/Containerfile \
+            --build-arg "BASE_IMAGE=$BASE_IMAGE" \
+            --tag "$IMAGE:${GITHUB_SHA}" \
+            .
+
+      # smoketests-all.sh globs /usr/local/bin/smoke-*.sh, so this picks up
+      # smoke-googlebook.sh along with the base and laptop tests. It re-checks the module
+      # vermagic and the hwdb entry, which is what catches a base image whose kernel has
+      # moved out from under this layer.
+      - name: Smoke test
+        run: |
+          podman run --rm \
+            "$IMAGE:${GITHUB_SHA}" \
+            smoketests-all.sh
+
+      - name: Publish
+        if: github.event_name != 'pull_request'
+        run: |
+          podman tag "$IMAGE:${GITHUB_SHA}" "$IMAGE:main"
+          podman push "$IMAGE:${GITHUB_SHA}"
+          podman push "$IMAGE:main"

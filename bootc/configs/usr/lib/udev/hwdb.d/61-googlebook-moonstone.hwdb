@@ -1,0 +1,7 @@
+# Moonstone's Vivaldi top row emits scancodes above 247, which the kernel cannot map to
+# keycodes on its own.
+evdev:atkbd:dmi:bvn*:bvr*:bd*:svnGoogle:pnMoonstone*
+ KEYBOARD_KEY_91=f11
+ KEYBOARD_KEY_9b=f20
+ KEYBOARD_KEY_a7=playpause
+ KEYBOARD_KEY_a9=prog1

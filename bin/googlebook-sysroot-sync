@@ -10,6 +10,18 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/sysro
 
 mount -o remount,rw /sysroot 2>/dev/null || true
 
+# On an ostree/bootc deployment /sysroot/usr is a composefs image and stays read-only even
+# after the remount above. Everything this script would copy into it is already part of
+# the container image there, so detect the case and skip those copies - otherwise the
+# `|| exit 1` guards below abort the sync before it reaches the /etc work, which is
+# writable on every layout and still needs doing.
+SYSROOT_USR_RW=1
+if [ -d /sysroot/ostree ] || ! (: >/sysroot/usr/.googlebook-rw-probe) 2>/dev/null; then
+  SYSROOT_USR_RW=0
+else
+  rm -f /sysroot/usr/.googlebook-rw-probe
+fi
+
 # 1. Install coreboot framebuffer modules, SoundWire audio modules & GPU staging rules into /sysroot
 KVER=$(uname -r)
 if [ -d "/sysroot/lib/modules/$KVER" ]; then
@@ -20,19 +32,19 @@ if [ -d "/sysroot/lib/modules/$KVER" ]; then
 fi
 
 # Keep the board firmware and bridge source available after switching root.
-if [ -d /usr/local/share/googlebook-sensors ]; then
+if [ "$SYSROOT_USR_RW" = 1 ] && [ -d /usr/local/share/googlebook-sensors ]; then
   mkdir -p /sysroot/usr/local/share/googlebook-sensors /sysroot/lib/firmware/intel/ish
   cp -a /usr/local/share/googlebook-sensors/. /sysroot/usr/local/share/googlebook-sensors/ || exit 1
   cp /usr/local/share/googlebook-sensors/firmware/intel/ish/ish_ptl_62b0f067_501de2f8.bin \
     /sysroot/lib/firmware/intel/ish/ || exit 1
 fi
 
-if [ -d /usr/local/share/googlebook-audio/firmware ]; then
+if [ "$SYSROOT_USR_RW" = 1 ] && [ -d /usr/local/share/googlebook-audio/firmware ]; then
   mkdir -p /sysroot/lib/firmware/realtek/rt1320
   cp -f /usr/local/share/googlebook-audio/firmware/*.dat /sysroot/lib/firmware/realtek/rt1320/ 2>/dev/null || true
 fi
 
-if [ -d /sysroot/usr/share/alsa/ucm2 ]; then
+if [ "$SYSROOT_USR_RW" = 1 ] && [ -d /sysroot/usr/share/alsa/ucm2 ]; then
   mkdir -p /sysroot/usr/share/alsa/ucm2/codecs/rt721+rt1320
   cat > /sysroot/usr/share/alsa/ucm2/codecs/rt721+rt1320/init.conf << 'UCMEOF'
 # RT721 + RT1320 combo speaker specific volume control settings
@@ -69,8 +81,11 @@ options spi_intel_pci writeable=1
 XEEOF
 
 # 2. Install Googlebook Slot A/B switch utility, googleboot-menu binary, udev rules, and sudoers
-mkdir -p /sysroot/usr/local/bin /sysroot/usr/local/sbin /sysroot/etc/udev/rules.d /sysroot/etc/sudoers.d
-for bin_name in googlebook-switch-slot googleboot-menu googleboot-scan googlebook-restore-slotb; do
+# On bootc these binaries are part of the image under /usr/local/bin already, so the loop
+# below has nothing to add; /etc/udev and /etc/sudoers.d stay writable either way.
+mkdir -p /sysroot/etc/udev/rules.d /sysroot/etc/sudoers.d
+[ "$SYSROOT_USR_RW" = 1 ] && mkdir -p /sysroot/usr/local/bin /sysroot/usr/local/sbin
+for bin_name in $([ "$SYSROOT_USR_RW" = 1 ] && echo googlebook-switch-slot googleboot-menu googleboot-scan googlebook-restore-slotb); do
   if [ -f "/usr/local/bin/$bin_name" ]; then
     # Absolute symlinks (e.g. to /usr/share/omarchy/bin) dangle in initramfs and make cp refuse.
     rm -f "/sysroot/usr/local/bin/$bin_name"
@@ -78,11 +93,11 @@ for bin_name in googlebook-switch-slot googleboot-menu googleboot-scan googleboo
     chmod 755 "/sysroot/usr/local/bin/$bin_name"
   fi
 done
-if [ -f /sysroot/boot/slotb-backup/googlebook-restore-slotb ] && [ ! -f /sysroot/usr/local/bin/googlebook-restore-slotb ]; then
+if [ "$SYSROOT_USR_RW" = 1 ] && [ -f /sysroot/boot/slotb-backup/googlebook-restore-slotb ] && [ ! -f /sysroot/usr/local/bin/googlebook-restore-slotb ]; then
   cp -f /sysroot/boot/slotb-backup/googlebook-restore-slotb /sysroot/usr/local/bin/googlebook-restore-slotb
   chmod 755 /sysroot/usr/local/bin/googlebook-restore-slotb
 fi
-ln -sf /usr/local/bin/googlebook-switch-slot /sysroot/usr/local/bin/boot-android
+[ "$SYSROOT_USR_RW" = 1 ] && ln -sf /usr/local/bin/googlebook-switch-slot /sysroot/usr/local/bin/boot-android
 
 # Remove legacy grants; slot switching uses the administrator's normal sudo policy.
 rm -f /sysroot/etc/udev/rules.d/99-googlebook-slotb.rules /sysroot/etc/sudoers.d/googlebook-slotb
@@ -125,6 +140,7 @@ volumeup = f12
 KEYDEOF
 
 # 4. Install googlebook-gpu-init.service to load Intel Xe2 driver before display-manager.service
+if [ "$SYSROOT_USR_RW" = 1 ]; then
 cat > /sysroot/usr/local/sbin/googlebook-gpu-init << 'GPUEOF'
 #!/bin/sh
 modprobe coreboot_table 2>/dev/null || true
@@ -162,6 +178,7 @@ fi
 exit 0
 GPUEOF
 chmod 755 /sysroot/usr/local/sbin/googlebook-gpu-init
+fi
 chroot /sysroot chcon --reference=/usr/bin/sh /usr/local/bin/googlebook-switch-slot /usr/local/bin/googleboot-menu /usr/local/bin/googleboot-scan /usr/local/bin/googlebook-restore-slotb /usr/local/sbin/googlebook-gpu-init 2>/dev/null || true
 
 # Run post-OTA promotion (Slot B -> Slot A) immediately during initramfs sync if Linux is staged in Slot A

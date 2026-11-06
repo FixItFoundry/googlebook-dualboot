@@ -1,0 +1,42 @@
+#!/bin/sh
+# googlebook-gpu-init
+# Brings up the parts of Moonstone that deliberately stay out of the Slot B initramfs:
+# the coreboot framebuffer, the staged Intel Panther Lake Xe2 driver, and the Vivaldi
+# top-row scancode mapping.
+modprobe coreboot_table 2>/dev/null || true
+modprobe framebuffer-coreboot 2>/dev/null || true
+
+# Map Moonstone Vivaldi top-row scancodes >247 (0x91 Fullscreen -> 87 F11,
+# 0x9B MicMute -> 190 F20, 0xA7 Access -> 164 PlayPause). These are out of range for
+# hwdb's keycode table, so they are set directly with EVIOCSKEYCODE.
+if command -v python3 >/dev/null 2>&1; then
+  python3 -I - << 'PY' 2>/dev/null || true
+import fcntl, glob, struct
+EVIOCSKEYCODE = 0x40084504
+for dev in glob.glob("/dev/input/by-path/*i8042-serio-0-event-kbd"):
+    with open(dev, "wb") as fd:
+        for sc, kc in [(0x91, 87), (0x9B, 190), (0xA7, 164)]:
+            try:
+                fcntl.ioctl(fd, EVIOCSKEYCODE, struct.pack("II", sc, kc))
+            except Exception:
+                pass
+PY
+fi
+
+# xe.ko is blacklisted for the initramfs so googleboot-menu keeps DRM master on
+# simpledrm; load it here, once /usr/lib/firmware/xe is reachable on the real root.
+if [ ! -e /dev/dri/renderD128 ]; then
+  modprobe xe gsc_firmware_path="" huc_firmware_path="" wedged_mode=0 enable_psr=0 2>/dev/null || true
+fi
+
+# If Linux was staged into Slot A to survive an Android OTA, promote the verified
+# Android OTA back to Slot A and restore Linux to Slot B.
+if [ -x /usr/local/bin/googlebook-restore-slotb ]; then
+  if [ -d /boot/slotb-backup ]; then
+    cp -f /usr/local/bin/googlebook-restore-slotb /boot/slotb-backup/googlebook-restore-slotb 2>/dev/null || true
+    chmod 755 /boot/slotb-backup/googlebook-restore-slotb 2>/dev/null || true
+  fi
+  /bin/sh /usr/local/bin/googlebook-restore-slotb --auto-post-ota >>/run/googlebook-restore-slotb.log 2>&1 || true
+fi
+
+exit 0

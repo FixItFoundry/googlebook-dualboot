@@ -1,0 +1,94 @@
+# Containerfile - Acer Googlebook 14 (Moonstone / Google_Fatcat) bootc image
+#
+# Build from the REPOSITORY ROOT, because this layer needs the out-of-tree module
+# sources and the boot menu that live beside it:
+#
+#   podman build -f bootc/Containerfile -t ghcr.io/dsmk/bootc-image-googlebook:main .
+#
+# See docs/BOOTC_GOOGLEBOOK.md for how to deploy the result onto Slot B.
+ARG BASE_IMAGE=ghcr.io/dsmk/bootc-image-laptop:main
+
+###############################################################################
+# Stage 1 - compile against the base image's own kernel
+#
+# Fedora ships "# CONFIG_GOOGLE_FIRMWARE is not set", so coreboot_table.ko and
+# framebuffer-coreboot.ko have to be built out of tree or Depthcharge gives Linux a
+# framebuffer that nothing binds to. On a package-based system googlebook-pack-slotb
+# builds them at pack time; here the kernel is fixed for the life of the image, so they
+# are built once, at image build time, against that exact kernel - and the build fails
+# loudly if the result does not match, instead of silently producing a black screen.
+#
+# The runtime image has no gcc/make and its /usr/lib/modules/*/build symlink dangles,
+# so this has to be a separate stage.
+###############################################################################
+FROM ${BASE_IMAGE} AS build
+
+RUN KVER="$(rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}' kernel-core)" \
+    && printf '%s' "$KVER" > /kver \
+    && dnf -y install "kernel-devel-${KVER}" gcc make zlib-ng-compat-devel \
+    && dnf clean all
+
+COPY coreboot-mods   /src/coreboot-mods
+COPY sensor-mods     /src/sensor-mods
+COPY audio-mods      /src/audio-mods
+COPY googleboot-menu /src/googleboot-menu
+
+RUN set -eux; \
+    KVER="$(cat /kver)"; KDIR="/usr/lib/modules/${KVER}/build"; \
+    test -d "${KDIR}"; \
+    mkdir -p /out/extra /out/updates /out/bin; \
+    make -C "${KDIR}" M=/src/coreboot-mods modules; \
+    make -C "${KDIR}" M=/src/sensor-mods   modules; \
+    make -C "${KDIR}" M=/src/audio-mods    modules; \
+    strip --strip-debug \
+      /src/coreboot-mods/coreboot_table.ko \
+      /src/coreboot-mods/framebuffer-coreboot.ko \
+      /src/sensor-mods/cros_ec_ishtp.ko \
+      /src/audio-mods/sdw_utils/snd-soc-sdw-utils.ko \
+      /src/audio-mods/intel/boards/snd-soc-sof-sdw.ko; \
+    cp /src/coreboot-mods/coreboot_table.ko \
+       /src/coreboot-mods/framebuffer-coreboot.ko \
+       /src/sensor-mods/cros_ec_ishtp.ko          /out/extra/; \
+    cp /src/audio-mods/sdw_utils/snd-soc-sdw-utils.ko \
+       /src/audio-mods/intel/boards/snd-soc-sof-sdw.ko /out/updates/; \
+    make -C /src/googleboot-menu; \
+    cp /src/googleboot-menu/bin/googleboot-menu /out/bin/
+
+###############################################################################
+# Stage 2 - the Googlebook image
+###############################################################################
+FROM ${BASE_IMAGE}
+
+LABEL org.opencontainers.image.title="Fedora bootc for Acer Googlebook 14 (Moonstone)"
+LABEL org.opencontainers.image.description="Depthcharge Slot B bootable Fedora bootc image for the Acer Googlebook 14 GP714-91N (board Moonstone / Google_Fatcat)"
+
+# Nothing to install: dracut, mkbootimg, kexec, sgdisk and zstd - everything the packer
+# needs - are already in the base image. keyd would belong here too, but Fedora 44 does not
+# package it (only the unrelated keydb), so the Vivaldi top row is handled by
+# 61-googlebook-moonstone.hwdb plus the EVIOCSKEYCODE pass in googlebook-gpu-init.
+# /etc/keyd/cros.conf still ships, so installing keyd from COPR later needs no changes.
+
+COPY --from=build /out/extra            /tmp/googlebook-mods/extra
+COPY --from=build /out/updates          /tmp/googlebook-mods/updates
+COPY --from=build /out/bin              /tmp/googlebook-mods/bin
+
+# The toolkit goes to /usr/local/share rather than /var/usrlocal: on fedora-bootc
+# /usr/local is a real directory inside /usr, so this is immutable, verity-backed
+# content that survives `find /var -mindepth 1 -delete`. Keeping the module sources
+# alongside it also means googlebook-pack-slotb finds SELF_DIR equal to this path and
+# skips its self-install step, which would otherwise try to write to a read-only /usr.
+COPY bin             /usr/local/share/googlebook-dualboot/bin
+COPY coreboot-mods   /usr/local/share/googlebook-dualboot/coreboot-mods
+COPY sensor-mods     /usr/local/share/googlebook-dualboot/sensor-mods
+COPY audio-mods      /usr/local/share/googlebook-dualboot/audio-mods
+COPY googleboot-menu /usr/local/share/googlebook-dualboot/googleboot-menu
+COPY docs            /usr/local/share/googlebook-dualboot/docs
+
+COPY --chmod=0644 bootc/configs/ /
+COPY --chmod=0755 bootc/files/   /
+
+COPY --chmod=0755 bootc/install-googlebook-layer.sh /tmp/install-googlebook-layer.sh
+RUN /tmp/install-googlebook-layer.sh \
+    && rm -rf /tmp/install-googlebook-layer.sh /tmp/googlebook-mods
+
+RUN bootc container lint

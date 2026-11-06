@@ -1,0 +1,15 @@
+[Unit]
+Description=Watch ostree boot entries and re-pack Googlebook Slot B on change
+ConditionPathExists=/run/ostree-booted
+
+[Path]
+# ostree flips the /boot/loader symlink between loader.0 and loader.1 when it swaps
+# boot versions, so an inotify watch set up through /boot/loader would keep pointing at
+# whichever directory was current when the watch was created. Watch both real
+# directories instead; systemd simply waits on whichever one does not exist yet.
+PathChanged=/boot/loader.0/entries
+PathChanged=/boot/loader.1/entries
+Unit=googlebook-slotb-sync.service
+
+[Install]
+WantedBy=multi-user.target

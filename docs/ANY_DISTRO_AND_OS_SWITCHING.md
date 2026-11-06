@@ -8,6 +8,15 @@ Use [`googlebook-pack-slotb`](../bin/googlebook-pack-slotb) from inside the inst
 
 Install the repository under `/usr/local/share/googlebook-dualboot` and link its packer into `/usr/local/bin` as shown in the README. This preserves access to the module sources and menu installer. The packer installs `/etc/kernel/install.d/95-googlebook-slotb.install`; distributions that do not call `kernel-install` need their own tested integration. Do not copy the old `fedomakase-googlebook-slotb` examples: that executable is not part of this branch.
 
+## Image-Based (bootc / ostree) Systems
+
+An ostree deployment cannot install anything at pack time, because `/usr` is a read-only
+composefs image, and it needs an `ostree=` kernel argument that `findmnt` cannot supply.
+`googlebook-pack-slotb` detects both conditions and reads the command line from the Boot
+Loader Specification entry instead. The hardware enablement moves to container build time;
+see [Running the Googlebook on a bootc Image](BOOTC_GOOGLEBOOK.md) and
+[`bootc/Containerfile`](../bootc/Containerfile).
+
 ## Boot Menu Limits
 
 The scanner understands BootLoaderSpec entries and selected `/boot/vmlinuz-*` layouts. It also detects several common live USB layouts. This is not a universal GRUB, UKI, NixOS, or distro configuration parser. Display handoff and `kexec` behavior need validation for each target kernel. The fallback command line assumes a Btrfs `root` subvolume; distributions with another layout should supply correct BootLoaderSpec entries.

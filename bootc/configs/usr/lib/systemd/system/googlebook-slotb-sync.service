@@ -1,0 +1,19 @@
+[Unit]
+Description=Refresh Googlebook Slot B boot images from the current ostree deployment
+Documentation=file:///usr/local/share/googlebook-dualboot/docs/BOOTC_GOOGLEBOOK.md
+# Only meaningful on an ostree/bootc deployment; on a package-based Fedora the
+# kernel-install hook in /etc/kernel/install.d does this job instead.
+ConditionPathExists=/run/ostree-booted
+RequiresMountsFor=/boot
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/googlebook-slotb-sync
+# A full dracut + zstd -22 pack of both ramdisks takes a couple of minutes on Moonstone.
+TimeoutStartSec=1800
+# Writing boot_b/init_boot_b/vendor_boot_b is raw block I/O on the boot disk.
+PrivateTmp=no
+
+[Install]
+WantedBy=multi-user.target

@@ -10,14 +10,114 @@ set -euo pipefail
 
 log() { echo "[googlebook-slotb] $*"; }
 
+# --- ostree / bootc deployments -------------------------------------------------------
+# On an ostree deployment (bootc, rpm-ostree) /usr is a composefs image mounted with
+# "readonly = true" per /usr/lib/ostree/prepare-root.conf and cannot be remounted rw, so
+# every artifact this script normally installs at pack time - the out-of-tree modules, the
+# ISH and RT1320 firmware, the ALSA UCM override - has to be baked into the container
+# image instead (see bootc/Containerfile). Probe for writability rather than assuming, so
+# the same script keeps behaving exactly as before on a package-based install.
+IMMUTABLE_USR=0
+if ! (: >/usr/lib/.googlebook-rw-probe) 2>/dev/null; then
+  IMMUTABLE_USR=1
+else
+  rm -f /usr/lib/.googlebook-rw-probe
+fi
+
+# The booted deployment is named to the initramfs by an "ostree=" kernel argument:
+# ostree-remount.service is gated on ConditionKernelCommandLine=ostree and the ostree
+# dracut module does nothing without it. Deriving root= and subvol= from findmnt the way
+# the package-based path does produces neither, because / is an overlay with no UUID of
+# its own. So on these systems the command line is taken from the Boot Loader
+# Specification entry ostree writes, which already carries root=, ostree= and rootflags.
+OSTREE_DEPLOY=0
+if [[ -f /run/ostree-booted || -d /ostree/deploy || -d /sysroot/ostree/deploy ]]; then
+  OSTREE_DEPLOY=1
+elif grep -qs 'ostree=' /boot/loader/entries/*.conf; then
+  # Packing from inside a deployment chroot, where /ostree is a symlink into /sysroot and
+  # dangles unless the physical root was bind-mounted. An entry carrying ostree= is the
+  # thing we actually care about, so take it as sufficient evidence on its own.
+  OSTREE_DEPLOY=1
+fi
+
+# Pick the entry ostree considers the default. libostree names entries
+# ostree-<n>[-<stateroot>].conf with n = n_deployments - index, writes "version" to that
+# same number, and appends ":<index>" to "title" - so index 0, the deployment that boots
+# next, has the highest version and a title ending in ":0)". Match that marker first and
+# fall back to the highest version, which picks the same entry if the title format moves.
+bls_default_entry() {
+  local d e best_v=-1 best_e="" v
+  for d in /boot/loader/entries /boot/loader.0/entries /boot/loader.1/entries; do
+    [[ -d "$d" ]] || continue
+    for e in "$d"/*.conf; do
+      [[ -f "$e" ]] || continue
+      grep -q '^title .*:0)[[:space:]]*$' "$e" && { printf '%s\n' "$e"; return 0; }
+      v=$(sed -n 's/^version[[:space:]]\{1,\}//p' "$e" | head -1)
+      [[ "$v" =~ ^[0-9]+$ ]] || v=0
+      (( v > best_v )) && { best_v=$v; best_e="$e"; }
+    done
+    [[ -n "$best_e" ]] && { printf '%s\n' "$best_e"; return 0; }
+  done
+  return 1
+}
+
+BLS_ENTRY=""
+if (( OSTREE_DEPLOY )); then
+  BLS_ENTRY=$(bls_default_entry) || {
+    log "ostree deployment detected but no Boot Loader Specification entry found."
+    log "  Mount /boot (partition 11 on Moonstone) before packing."
+    exit 1
+  }
+  log "ostree deployment; default boot entry $BLS_ENTRY"
+fi
+
 KVER="${1:-}"
+VMLINUZ=""
+if [[ -z "$KVER" && -n "$BLS_ENTRY" ]]; then
+  # libostree always names the kernel vmlinuz-<kver>, so the version comes straight off the
+  # basename. Reading it from the entry instead of from `ls /lib/modules` is what makes a
+  # freshly staged deployment packable: after `bootc upgrade` the new kernel is already in
+  # /boot while the running /usr still carries only the old one.
+  #
+  # The "linux" field is written either root-relative ("/boot/ostree/...", when ostree has
+  # enable_bootprefix set) or relative to the /boot mount ("/ostree/..."), so try the
+  # literal path first and the /boot-prefixed form second. Some layouts carry a
+  # "/boot/boot -> ." self-symlink that makes the wrong form resolve anyway; this ordering
+  # does not depend on it.
+  bls_linux=$(sed -n 's/^linux[[:space:]]\{1,\}//p' "$BLS_ENTRY" | head -1)
+  for cand in "$bls_linux" "/boot${bls_linux}" "/boot/${bls_linux#/}"; do
+    [[ -f "$cand" ]] && { VMLINUZ="$cand"; break; }
+  done
+  [[ -n "$VMLINUZ" ]] || { log "kernel '$bls_linux' named by $BLS_ENTRY not found under /boot"; exit 1; }
+  KVER="${VMLINUZ##*/vmlinuz-}"
+fi
 if [[ -z "$KVER" ]]; then
   KVER=$(ls -1 /lib/modules | sort -V | tail -1)
 fi
-VMLINUZ="/lib/modules/$KVER/vmlinuz"
-[[ -f "$VMLINUZ" ]] || VMLINUZ="/boot/vmlinuz-$KVER"
-[[ -f "$VMLINUZ" ]] || VMLINUZ="/boot/vmlinuz-linux"
+if [[ -z "$VMLINUZ" ]]; then
+  VMLINUZ="/lib/modules/$KVER/vmlinuz"
+  [[ -f "$VMLINUZ" ]] || VMLINUZ="/boot/vmlinuz-$KVER"
+  [[ -f "$VMLINUZ" ]] || VMLINUZ="/boot/vmlinuz-linux"
+fi
 [[ -f "$VMLINUZ" ]] || { log "no kernel image for $KVER"; exit 1; }
+
+# dracut needs the module tree for $KVER, and so does the module copy into the initramfs
+# further down. On a staged bootc deployment the new kernel sits in /boot while the
+# running /usr still has only the old modules, so resolve the tree out of the deployment
+# itself. Initramfs userspace does not have to match the kernel; its modules do.
+KMOD_BASE="/lib/modules/$KVER"
+KMODDIR_ARGS=()
+if [[ ! -d "$KMOD_BASE" ]]; then
+  for d in /ostree/deploy/*/deploy/*/usr/lib/modules/"$KVER" \
+           /sysroot/ostree/deploy/*/deploy/*/usr/lib/modules/"$KVER"; do
+    [[ -d "$d" ]] || continue
+    KMOD_BASE="$d"
+    KMODDIR_ARGS=(--kmoddir "$d")
+    log "module tree for $KVER resolved to $d"
+    break
+  done
+  [[ -d "$KMOD_BASE" ]] || { log "no module tree for $KVER"; exit 1; }
+fi
 
 DISK="${2:-}"
 if [[ -z "$DISK" ]]; then
@@ -63,8 +163,15 @@ command -v mkbootimg >/dev/null || { log "mkbootimg unavailable"; exit 1; }
 mkbootimg --help >/dev/null || { log "mkbootimg cannot run"; exit 1; }
 
 # --- ensure coreboot_table.ko & framebuffer-coreboot.ko are installed for $KVER ---
-mkdir -p "/lib/modules/$KVER/extra"
-if [[ -d "$SELF_DIR/coreboot-mods/prebuilt/$KVER" ]]; then
+# Where /usr is immutable, the modules, the firmware and the UCM override below are all
+# already in the container image and every step here is a deliberate no-op rather than a
+# failure. `mkdir -p` on an existing directory succeeds even on a read-only filesystem, so
+# only the paths that would genuinely be created need guarding.
+if (( IMMUTABLE_USR )); then
+  log "immutable /usr: using the modules, firmware and UCM already in the image"
+fi
+mkdir -p "/lib/modules/$KVER/extra" 2>/dev/null || true
+if (( ! IMMUTABLE_USR )) && [[ -d "$SELF_DIR/coreboot-mods/prebuilt/$KVER" ]]; then
   cp -f "$SELF_DIR/coreboot-mods/prebuilt/$KVER"/*.ko "/lib/modules/$KVER/extra/" 2>/dev/null || true
 elif [[ -d "$SELF_DIR/coreboot-mods" && -d "/lib/modules/$KVER/build" ]]; then
   CB_BUILD=$(mktemp -d)
@@ -79,8 +186,8 @@ fi
 AUDIO_MODS_DIR="$SELF_DIR/audio-mods"
 [[ -d "$AUDIO_MODS_DIR/sdw_utils" ]] || AUDIO_MODS_DIR="/usr/local/src/moonstone-audio-fix"
 [[ -d "$AUDIO_MODS_DIR/sdw_utils" ]] || AUDIO_MODS_DIR="/usr/share/omarchy/install/hardware/audio-mods"
-mkdir -p "/lib/modules/$KVER/updates"
-if [[ -d "$AUDIO_MODS_DIR/prebuilt/$KVER" ]]; then
+mkdir -p "/lib/modules/$KVER/updates" 2>/dev/null || true
+if (( ! IMMUTABLE_USR )) && [[ -d "$AUDIO_MODS_DIR/prebuilt/$KVER" ]]; then
   cp -f "$AUDIO_MODS_DIR/prebuilt/$KVER"/*.ko "/lib/modules/$KVER/updates/" 2>/dev/null || true
 elif [[ -d "$AUDIO_MODS_DIR/sdw_utils" && -d "/lib/modules/$KVER/build" ]]; then
   AUD_BUILD=$(mktemp -d)
@@ -90,11 +197,11 @@ elif [[ -d "$AUDIO_MODS_DIR/sdw_utils" && -d "/lib/modules/$KVER/build" ]]; then
   cp -f "$AUD_BUILD/sdw_utils/snd-soc-sdw-utils.ko" "$AUD_BUILD/intel/boards/snd-soc-sof-sdw.ko" "/lib/modules/$KVER/updates/" 2>/dev/null || true
   rm -rf "$AUD_BUILD"
 fi
-if [[ -d "$AUDIO_MODS_DIR/firmware/realtek/rt1320" ]]; then
+if (( ! IMMUTABLE_USR )) && [[ -d "$AUDIO_MODS_DIR/firmware/realtek/rt1320" ]]; then
   mkdir -p /lib/firmware/realtek/rt1320
   cp -f "$AUDIO_MODS_DIR/firmware/realtek/rt1320"/*.dat /lib/firmware/realtek/rt1320/ 2>/dev/null || true
 fi
-if [[ -d /usr/share/alsa/ucm2 ]]; then
+if (( ! IMMUTABLE_USR )) && [[ -d /usr/share/alsa/ucm2 ]]; then
   mkdir -p /usr/share/alsa/ucm2/codecs/rt721+rt1320
   cat > /usr/share/alsa/ucm2/codecs/rt721+rt1320/init.conf <<'UCMEOF'
 # RT721 + RT1320 combo speaker specific volume control settings
@@ -123,7 +230,12 @@ fi
 SENSOR_MODS_DIR="$SELF_DIR/sensor-mods"
 [[ -d "$SENSOR_MODS_DIR" ]] || SENSOR_MODS_DIR="/usr/local/share/googlebook-sensors"
 [[ -d "$SENSOR_MODS_DIR" ]] || SENSOR_MODS_DIR="/usr/share/omarchy/install/hardware/sensor-mods"
-if [[ -d "$SENSOR_MODS_DIR" ]]; then
+if (( IMMUTABLE_USR )) && [[ -d "$SENSOR_MODS_DIR" ]]; then
+  # The bridge module and the ISH firmware are in the image; 91-googlebook-sensors.conf
+  # ships there too, so there is nothing left to install - but SENSOR_MODS_DIR still has
+  # to stay set, because the initramfs copy further down reads from it.
+  :
+elif [[ -d "$SENSOR_MODS_DIR" ]]; then
   if [[ -f "$SENSOR_MODS_DIR/prebuilt/$KVER/cros_ec_ishtp.ko" ]]; then
     install -D -m644 "$SENSOR_MODS_DIR/prebuilt/$KVER/cros_ec_ishtp.ko" "/lib/modules/$KVER/extra/cros_ec_ishtp.ko"
   elif ! modinfo -k "$KVER" cros_ec_ishtp >/dev/null 2>&1 && [[ -d "/lib/modules/$KVER/build" ]]; then
@@ -166,19 +278,41 @@ W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
 
 # --- build hostonly initramfs omitting blacklisted GPU/Wi-Fi/BT/Audio firmware so it fits in Slot B ---
-dracut -f --hostonly --no-early-microcode --kver "$KVER" \
+dracut -f --hostonly --no-early-microcode --kver "$KVER" ${KMODDIR_ARGS[@]+"${KMODDIR_ARGS[@]}"} \
   --omit-drivers "i915 xe amdgpu radeon nouveau cxgb4 iwlwifi iwlmld btintel btintel_pcie bluetooth cfg80211 mac80211 snd snd_sof snd_sof_pci_intel_ptl soundwire_bus intel_vpu" \
   --add-drivers "nvme nvme_core btrfs uas usb_storage coreboot_table framebuffer-coreboot cros_ec cros_ec_lpcs cros_ec_keyb" \
   --compress "zstd -19 -T0" "$W/initramfs.img" >/dev/null
 
 # --- kernel command line ---
-ROOT_UUID=$(findmnt -no UUID /)
-SUBVOL=$(findmnt -no OPTIONS / | tr ',' '\n' | sed -n 's/^subvol=\/\{0,1\}//p' | head -1)
-CMDLINE="root=UUID=$ROOT_UUID rw console=tty0 rd.driver.pre=coreboot_table,framebuffer-coreboot clk_ignore_unused quiet rhgb bootconfig"
-[[ -n "$SUBVOL" ]] && CMDLINE="$CMDLINE rootflags=subvol=$SUBVOL"
+# Arguments this toolkit is responsible for, regardless of where the rest comes from.
+GB_ARGS="rw console=tty0 rd.driver.pre=coreboot_table,framebuffer-coreboot clk_ignore_unused quiet rhgb bootconfig"
+if [[ -n "$BLS_ENTRY" ]]; then
+  # ostree owns root=, ostree= and rootflags= for its deployments, and rewrites them on
+  # every upgrade and rollback, so take them from the entry verbatim and only add our own
+  # on top. Strip anything we are about to set ourselves so it is not specified twice.
+  BLS_OPTS=$(sed -n 's/^options[[:space:]]\{1,\}//p' "$BLS_ENTRY" | head -1)
+  CMDLINE=""
+  for arg in $BLS_OPTS; do
+    case "$arg" in
+      rw|ro|console=tty0|quiet|rhgb|bootconfig|clk_ignore_unused|rd.driver.pre=*) continue ;;
+    esac
+    CMDLINE="${CMDLINE:+$CMDLINE }$arg"
+  done
+  CMDLINE="$CMDLINE $GB_ARGS"
+  case " $CMDLINE " in
+    *" ostree="*) ;;
+    *) log "warning: $BLS_ENTRY has no ostree= argument; the deployment will not be found" ;;
+  esac
+else
+  ROOT_UUID=$(findmnt -no UUID /)
+  SUBVOL=$(findmnt -no OPTIONS / | tr ',' '\n' | sed -n 's/^subvol=\/\{0,1\}//p' | head -1)
+  CMDLINE="root=UUID=$ROOT_UUID $GB_ARGS"
+  [[ -n "$SUBVOL" ]] && CMDLINE="$CMDLINE rootflags=subvol=$SUBVOL"
+fi
 if [[ -s /etc/crypttab ]]; then
   while read -r _name dev _rest; do
     [[ -z "$_name" || "$_name" == \#* ]] && continue
+    case " $CMDLINE " in *" rd.luks.uuid=${dev#UUID=} "*) continue ;; esac
     CMDLINE="$CMDLINE rd.luks.uuid=${dev#UUID=}"
   done < /etc/crypttab
 fi
@@ -222,8 +356,8 @@ for sync_script in \
              "$W/unpacked/usr/local/share/googlebook-audio/firmware" \
              "$W/unpacked/etc/systemd/system/initrd.target.wants" \
              "$W/unpacked/etc/systemd/system/initrd-switch-root.target.wants"
-    cp -f "/lib/modules/$KVER/extra"/*.ko "$W/unpacked/usr/local/lib/googlebook-mods/" 2>/dev/null || true
-    cp -f "/lib/modules/$KVER/updates"/snd-soc-*.ko "$W/unpacked/usr/local/lib/googlebook-audio-mods/" 2>/dev/null || true
+    cp -f "$KMOD_BASE/extra"/*.ko "$W/unpacked/usr/local/lib/googlebook-mods/" 2>/dev/null || true
+    cp -f "$KMOD_BASE/updates"/snd-soc-*.ko "$W/unpacked/usr/local/lib/googlebook-audio-mods/" 2>/dev/null || true
     cp -f /lib/firmware/realtek/rt1320/rt1320_*Google_Moonstone*.dat "$W/unpacked/usr/local/share/googlebook-audio/firmware/" 2>/dev/null || true
     cp -f "$sync_script" "$W/unpacked/usr/bin/googlebook-sysroot-sync"
     cp -f "$sync_script" "$W/unpacked/usr/local/bin/googlebook-sysroot-sync"

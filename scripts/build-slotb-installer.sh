@@ -224,8 +224,13 @@ if [[ -d "$KMOD/drivers/net/ethernet" ]]; then
   find "$KMOD/drivers/net/ethernet" -mindepth 1 -maxdepth 1 ! -name 'realtek' -exec rm -rf {} + 2>/dev/null || true
 fi
 if [[ -d "$KMOD/drivers/net/phy" ]]; then
+  # phylink.ko and phy_package.ko are hard dependencies of USB-C Ethernet drivers (asix.ko
+  # for the AX88772 family, lan78xx.ko). libphy/fixed_phy/mdio_devres are built into Fedora
+  # kernels, so dropping phylink leaves those drivers failing to insmod with unresolved
+  # phylink_* symbols, which at boot looks exactly like the adapter not existing.
   find "$KMOD/drivers/net/phy" -maxdepth 1 -type f -name '*.ko*' \
-    ! -name 'libphy*' ! -name 'fixed_phy*' ! -name 'mdio*' -delete 2>/dev/null || true
+    ! -name 'libphy*' ! -name 'fixed_phy*' ! -name 'mdio*' \
+    ! -name 'phylink*' ! -name 'phy_package*' -delete 2>/dev/null || true
 fi
 if [[ -d "$KMOD/drivers/scsi" ]]; then
   find "$KMOD/drivers/scsi" -mindepth 1 -maxdepth 1 \
@@ -237,6 +242,65 @@ if [[ -d "$KMOD/fs/nls" ]]; then
   find "$KMOD/fs/nls" -maxdepth 1 -type f -name '*.ko*' \
     ! -name 'nls_utf8*' ! -name 'nls_iso8859*' ! -name 'nls_cp437*' ! -name 'nls_ascii*' \
     -delete 2>/dev/null || true
+fi
+
+# dracut's iscsi module aborts the entire boot when iscsi_tcp cannot be modprobed:
+#   90-parse-iscsiroot.sh:  modprobe -b -q iscsi_tcp || die "iscsiroot requested but ..."
+# That probe is unconditional despite its message - it is not gated on an iSCSI root having
+# been requested - so once drivers/scsi is pruned it kills Stage 1 at ~1.3s, before the
+# network is ever brought up, and die() powers the machine off unless rd.shell is set.
+# The iSCSI userspace (iscsiadm/iscsid) is already removed above and Moonstone never boots
+# from iSCSI, so drop the hooks rather than carry ~1.2 MiB of iSCSI transport modules.
+rm -f "$WORK/unpacked/usr/lib/dracut/hooks/cmdline/90-parse-iscsiroot.sh" \
+      "$WORK/unpacked/usr/lib/dracut/hooks/cleanup/90-cleanup-iscsi.sh" \
+      "$WORK/unpacked/usr/sbin/iscsiroot" \
+      "$WORK/unpacked/sbin/iscsiroot" 2>/dev/null || true
+rm -f "$KMOD/drivers/firmware/iscsi_ibft.ko"* 2>/dev/null || true
+
+# Audit the prune: a surviving module whose dependency was removed cannot insmod at all, and
+# at boot that is indistinguishable from the device being absent. Only device classes needed
+# to reach Stage 2 are reported; pruned subsystems (infiniband, sound, mmc) are expected to
+# have dangling dependents and are deliberately not restored, to stay inside the Slot B budget.
+if command -v python3 >/dev/null 2>&1; then
+  python3 -I - "$WORK/unpacked/usr/lib/modules/$KVER" <<'PY' || true
+import os, re, sys
+
+mdir = sys.argv[1]
+KO = re.compile(r"\.ko(\.(xz|zst|gz))?$")
+BOOT_PATH = ("kernel/drivers/net/", "kernel/drivers/usb/", "kernel/drivers/hid/",
+             "kernel/drivers/input/", "kernel/drivers/firmware/",
+             "kernel/drivers/platform/", "extra/")
+
+def modname(path):
+    return KO.sub("", os.path.basename(path)).replace("-", "_")
+
+present = set()
+for root, _, files in os.walk(mdir):
+    for f in files:
+        if KO.search(f):
+            present.add(modname(f))
+
+broken = []
+dep_path = os.path.join(mdir, "modules.dep")
+if os.path.exists(dep_path):
+    for line in open(dep_path, errors="replace"):
+        if ":" not in line:
+            continue
+        lhs, rhs = line.split(":", 1)
+        lhs = lhs.strip()
+        if modname(lhs) not in present or not lhs.startswith(BOOT_PATH):
+            continue
+        gone = [modname(d) for d in rhs.split() if modname(d) not in present]
+        if gone:
+            broken.append((modname(lhs), gone))
+
+if broken:
+    sys.stderr.write(
+        "      Warning: %d boot-path module(s) have pruned dependencies and cannot load:\n"
+        % len(broken))
+    for name, gone in sorted(broken)[:12]:
+        sys.stderr.write("        %s needs %s\n" % (name, " ".join(gone)))
+PY
 fi
 
 # Stage Moonstone sensor sources + firmware, and inject prebuilt/host sensor modules when available (non-fatal)
@@ -523,7 +587,22 @@ case "$MODE" in
     ;;
 esac
 
-CMDLINE="${STAGE_ARGS} rd.driver.pre=coreboot_table,framebuffer-coreboot clk_ignore_unused ${GPU_ARGS} console=tty0 bootconfig ${EXTRA_CMDLINE}"
+# Modules loaded before udev coldplug. The Coreboot framebuffer pair stays first so a console
+# exists for the rest of the boot. For network boot the USB-C Ethernet drivers are added
+# explicitly: udev's modalias autoload does not reliably bind the adapter before dracut needs
+# the network (r8152 in particular registers a device-level config selector that must be
+# resident when the dongle is enumerated), and since wireless drivers are pruned from the
+# Stage 1 initramfs this adapter is the only transport available to reach Stage 2.
+# loop/squashfs/overlay mount the Stage 2 image (dmsquash-live-root loop-mounts install.img or
+# squashfs.img). On-demand autoload of these is not reliable in the pruned initramfs - losetup
+# fails with "/dev/loop0: No such file or directory" because loop was never loaded and
+# /dev/loop-control therefore never appeared - so load them up front for every source mode.
+RD_DRIVER_PRE="coreboot_table,framebuffer-coreboot,loop,squashfs,overlay"
+if [[ "$SOURCE" == http://* || "$SOURCE" == https://* ]]; then
+  RD_DRIVER_PRE="${RD_DRIVER_PRE},mii,usbnet,r8152,asix,ax88179_178a,cdc_ether,cdc_ncm,rndis_host,aqc111,smsc95xx,smsc75xx,lan78xx"
+fi
+
+CMDLINE="${STAGE_ARGS} rd.driver.pre=${RD_DRIVER_PRE} clk_ignore_unused ${GPU_ARGS} console=tty0 bootconfig ${EXTRA_CMDLINE}"
 
 "$MKBOOTIMG" --header_version 4 --kernel "$VMLINUZ" --cmdline "" \
   --os_version 17.0.0 --os_patch_level 2026-09 -o "$OUT_DIR/boot_b.img"

@@ -29,6 +29,7 @@ Depthcharge selects the active boot slot by reading the ChromeOS/Depthcharge GPT
 > [!WARNING]
 > **Android System Updates (OTA):** Installing a Googlebook OS system update overwrites Slot B (Linux) with the new Android build.
 > To bring Linux back after an update, run `./bin/googlebook-restore-slotb --adb ./slotb-backup --reboot` (or use the [Android restore app](android-restore-app/README.md)). On the next Fedora boot, Linux automatically moves the updated Android system to Slot A and restores Linux to Slot B.
+> **You need a USB-C Ethernet adapter for this.** The restore runs in the bootloader's Fastboot, which only works over wired Ethernet (TCP port `5554`). It does not work over Wi-Fi, and bootloader Fastboot over USB does not currently work on the Googlebook. Keep an adapter with your backup before installing an update.
 
 ---
 

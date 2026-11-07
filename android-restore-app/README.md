@@ -1,6 +1,8 @@
 # Googlebook Slot B Restore (Android Phone App)
 
-Restore Linux on your Acer Googlebook 14 (`Moonstone`) directly from an Android phone over **TCP Fastboot (`<IP>:5554`, recommended)** or an active Host-to-Host USB cable.
+Restore Linux on your Acer Googlebook 14 (`Moonstone`) directly from an Android phone over **TCP Fastboot (`<IP>:5554`)**. The laptop needs a USB-C Ethernet adapter on the same network as the phone.
+
+> The app's **USB-C Cable** mode does not work with the Googlebook right now. Its USB-C ports are host-only, so a direct phone-to-laptop cable can't reach Fastboot, and bootloader Fastboot over a Host-to-Host bridge cable is a known issue.
 
 ## Build & Install
 

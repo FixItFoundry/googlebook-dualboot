@@ -232,6 +232,11 @@ for sync_script in \
       cp -f "$SELF_DIR/bin/googlebook-restore-slotb" "$W/unpacked/usr/local/bin/googlebook-restore-slotb"
       chmod 755 "$W/unpacked/usr/local/bin/googlebook-restore-slotb"
     fi
+    # Distro add-ons (e.g. the Fedomakase branch) put extra sync steps here.
+    if [[ -d /etc/googlebook/sysroot-sync.d ]]; then
+      mkdir -p "$W/unpacked/etc/googlebook"
+      cp -a /etc/googlebook/sysroot-sync.d "$W/unpacked/etc/googlebook/"
+    fi
     cat > "$W/unpacked/etc/systemd/system/googlebook-sysroot-sync.service" << 'SYNCSVCEOF'
 [Unit]
 Description=GoogleBook Moonstone Sysroot Hardware & Module Sync

@@ -197,4 +197,9 @@ SVCEOF
 ln -sf ../googlebook-gpu-init.service /sysroot/etc/systemd/system/multi-user.target.wants/googlebook-gpu-init.service
 ln -sf ../googlebook-gpu-init.service /sysroot/etc/systemd/system/graphical.target.wants/googlebook-gpu-init.service
 
+# Distro add-on steps packed in by googlebook-pack-slotb from /etc/googlebook/sysroot-sync.d.
+for step in /etc/googlebook/sysroot-sync.d/*; do
+  [ -x "$step" ] && { "$step" || echo "[googlebook-sysroot-sync] $step failed" >&2; }
+done
+
 exit 0

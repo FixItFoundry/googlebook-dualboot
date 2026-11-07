@@ -58,6 +58,8 @@ Before=cryptsetup-pre.target cryptsetup.target initrd-switch-root.target dracut-
 
 [Service]
 Type=oneshot
+# Release discovery mounts when the menu exits, even if explicit unmount fails.
+PrivateMounts=yes
 StandardInput=tty
 StandardOutput=tty
 TTYPath=/dev/tty1

@@ -1333,7 +1333,7 @@ static int load_boot_entries(boot_entry_t *entries, int max_entries, const char 
             snprintf(e->luks_dev, sizeof(e->luks_dev), "%s", tok ? tok : "");
             tok = strsep(&fields, "|");
             snprintf(e->action_cmd, sizeof(e->action_cmd), "%s", tok ? tok : "");
-            tok = strtok_r(NULL, "|", &saveptr);
+            tok = strsep(&fields, "|");
             e->group = tok ? atoi(tok) : 0;
             count++;
         }

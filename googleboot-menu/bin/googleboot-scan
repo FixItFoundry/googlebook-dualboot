@@ -164,8 +164,6 @@ unlock_luks() {
         fi
       done < /etc/crypttab
     fi
-    printf '%s' "$pass" > "$MNT_BASE/luks.pass"
-    chmod 600 "$MNT_BASE/luks.pass"
     udevadm trigger --action=change 2>/dev/null || true
     udevadm settle --timeout=5 2>/dev/null || true
   fi

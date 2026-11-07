@@ -337,6 +337,17 @@ run_sysroot_sync_now() {
   fi
 }
 
+# Extract the ostree= argument from a command line string. Pure bash on purpose: this runs in
+# the Slot B initramfs, where sed and awk are only present if some dracut module happened to
+# pull them in.
+ostree_arg() {
+  local a
+  for a in $1; do
+    case "$a" in ostree=*) printf '%s' "${a#ostree=}"; return 0 ;; esac
+  done
+  return 1
+}
+
 boot_entry() {
   local target_id="$1"
   mount_boot_ro || true
@@ -386,7 +397,27 @@ boot_entry() {
           # If running inside Slot B initramfs and selected kernel matches running Slot B kernel
           # (including Arch's unversioned /boot/vmlinuz-linux), skip redundant kexec so systemd
           # mounts /sysroot via /proc/cmdline, runs googlebook-sysroot-sync.service, and switch-roots cleanly!
-          if [[ -f /etc/initrd-release && ( "$fkernel" == "SlotB-Direct" || "$fkernel" == */vmlinuz-linux || ( -n "$running_kver" && "$fkernel" == *"$running_kver"* ) ) && "$target_id" != usb:* ]]; then
+          # The direct path reuses the command line baked into vendor_boot_b at pack time, and
+          # on an ostree deployment that line carries ostree=/ostree/boot.<n>/<stateroot>/...
+          # ostree flips <n> and rewrites those paths on every deployment change, so after a
+          # `bootc upgrade` that Slot B has not been repacked for, the baked path names a
+          # directory that no longer exists and the boot dies in the initramfs with
+          #   ostree-prepare-root: Couldn't find specified OSTree root '...': No such file or directory
+          # which is unrecoverable in place, because a bootc image's root account is locked and
+          # the emergency shell cannot be opened. The BLS entry's own command line is correct by
+          # construction, so when the two disagree, fall through to kexec and use the entry's.
+          local running_ostree="" entry_ostree="" ostree_fresh=1
+          running_ostree=$(ostree_arg "$(cat /proc/cmdline 2>/dev/null)" || true)
+          entry_ostree=$(ostree_arg "$fcmdline" || true)
+          if [[ -n "$entry_ostree" && -n "$running_ostree" && "$running_ostree" != "$entry_ostree" ]]; then
+            ostree_fresh=0
+            echo "[googleboot-scan] Slot B command line is stale; re-booting via the current boot entry."
+            echo "[googleboot-scan]   packed: ostree=$running_ostree"
+            echo "[googleboot-scan]   entry:  ostree=$entry_ostree"
+            echo "[googleboot-scan]   run googlebook-pack-slotb to make this direct again."
+          fi
+          if [[ -f /etc/initrd-release && ( "$fkernel" == "SlotB-Direct" || "$fkernel" == */vmlinuz-linux || ( -n "$running_kver" && "$fkernel" == *"$running_kver"* ) ) && "$target_id" != usb:* ]] \
+             && (( ostree_fresh )); then
             echo "[googleboot-scan] Proceeding via direct Slot B switch-root..."
             umount "$BOOT_MNT" 2>/dev/null || true
             udevadm settle --timeout=5 2>/dev/null || true

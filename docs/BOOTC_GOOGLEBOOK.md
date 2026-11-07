@@ -517,6 +517,33 @@ skipped rather than failing, and cannot leave a stub again. `googlebook-gpu-init
 this on every boot, rebuilding instead of removing when `/etc/udev/hwdb.d/` does hold local
 entries, since those exist nowhere else.
 
+**`ostree-prepare-root: Couldn't find specified OSTree root '/sysroot/ostree/boot.1/…':
+No such file or directory`, after a `bootc upgrade`.** The deployment is fine; the path is
+stale. ostree alternates its boot directory between `boot.0` and `boot.1` on every deployment
+change and rewrites the entries to match, but Slot B's `ostree=` is baked into
+`vendor_boot_b`'s `vendor_cmdline` at pack time. An upgrade that Slot B was not repacked for
+therefore leaves it pointing at a directory that no longer exists.
+
+`googleboot-scan` now detects this: before taking its direct switch-root shortcut it compares
+the `ostree=` it booted with against the one in the selected boot entry, and falls through to
+`kexec` when they disagree, since the entry's command line is correct by construction. Slot B
+survives an un-repacked upgrade with one extra kexec and a message saying so. Repack to make
+it direct again.
+
+**To recover a machine already in this state**, boot installation media and repack. Pick the
+deployment deliberately — after an upgrade there are two, and `ls … | head -1` is as likely
+to pick the rollback as the one that boots:
+
+```bash
+SYSROOT=/mnt/sysroot                 # wherever the btrfs subvol is mounted
+ENTRY=$(grep -l '^options .*ostree=' "$SYSROOT"/boot/loader/entries/*.conf | head -1)
+OSTREE_ARG=$(sed -n 's/^options .*ostree=\([^ ]*\).*/\1/p' "$ENTRY" | head -1)
+DEPLOY=$(readlink -f "$SYSROOT$OSTREE_ARG")   # the deployment that entry actually boots
+echo "$DEPLOY"
+```
+
+Then bind-mount and chroot as in section 3 and run `googlebook-pack-slotb`.
+
 **Slot B boots, but into the pre-migration OS instead of the bootc deployment.** This one
 has no error message anywhere, which is what makes it confusing. `bootc install
 to-existing-root` leaves the previous installation's files in the subvolume — it adds

@@ -11,9 +11,9 @@ Linux dual-boot tools, a graphical `kexec` boot menu, and Coreboot/Panther Lake 
 > [!NOTE]
 > **This is the Fedomakase branch: `main` plus the Fedomakase install add-ons.**
 > - `patches/omarchy-ks.cfg` and `patches/omarchy-installer.sh` replace the files of the same name in the Fedomakase ISO (`omarchy/installer/`). The installer adds the user to the `input` group for tablet-mode events.
-> - The ISO's Omarchy payload (copied to `/usr/share/omarchy` during install) must carry this repository's `bin/`, `googleboot-menu/`, `coreboot-mods/`, `audio-mods/`, `sensor-mods/` and `fedomakase/` under `googlebook-dualboot/`. The kickstart's last `%post` installs `fedomakase/50-omarchy-self-heal` to `/etc/googlebook/sysroot-sync.d/` and runs `googlebook-pack-slotb`, which then handles kernel updates like any other install.
+> - The kickstart's last `%post` uses this toolkit from `googlebook-dualboot/` in the ISO's Omarchy payload (copied to `/usr/share/omarchy`) when present, and otherwise downloads this branch from GitHub (network install). It installs `fedomakase/50-omarchy-self-heal` to `/etc/googlebook/sysroot-sync.d/` and runs `googlebook-pack-slotb`, which then handles kernel updates like any other install.
 > - `fedomakase/50-omarchy-self-heal` runs on every boot from the Slot B initramfs: it repairs the Omarchy (Hyprland + SDDM + UWSM) system and user configuration, sets SDDM autologin for the primary user, and keeps SELinux permissive so files written from the initramfs don't break logins.
-> - Coreboot, sensor and audio modules come from each `*-mods/prebuilt/<kernel>` folder, or are built when `kernel-devel` for the installed kernel is present.
+> - Coreboot, sensor and audio modules come from each `*-mods/prebuilt/<kernel>` folder, or are built from source; the kickstart installs `kernel-devel`, `gcc` and `make` for that.
 
 ---
 

@@ -47,11 +47,11 @@ attr_of() {
 set_slot_attrs() {
   local attr_a="$1" attr_b="$2"
   local args=(
-    "--attributes=${P_VBMETA_A}:=${attr_a}"
-    "--attributes=${P_VBMETA_B}:=${attr_b}"
+    "--attributes=${P_VBMETA_A}:=:${attr_a}"
+    "--attributes=${P_VBMETA_B}:=:${attr_b}"
   )
-  [[ -n "$P_BOOT_A" ]] && args+=("--attributes=${P_BOOT_A}:=${attr_a}")
-  [[ -n "$P_BOOT_B" ]] && args+=("--attributes=${P_BOOT_B}:=${attr_b}")
+  [[ -n "$P_BOOT_A" ]] && args+=("--attributes=${P_BOOT_A}:=:${attr_a}")
+  [[ -n "$P_BOOT_B" ]] && args+=("--attributes=${P_BOOT_B}:=:${attr_b}")
   sgdisk "${args[@]}" "$DISK" >/dev/null
 }
 

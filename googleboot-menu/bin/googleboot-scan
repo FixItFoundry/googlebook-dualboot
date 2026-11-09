@@ -164,8 +164,6 @@ unlock_luks() {
         fi
       done < /etc/crypttab
     fi
-    printf '%s' "$pass" > "$MNT_BASE/luks.pass"
-    chmod 600 "$MNT_BASE/luks.pass"
     udevadm trigger --action=change 2>/dev/null || true
     udevadm settle --timeout=5 2>/dev/null || true
   fi
@@ -208,6 +206,18 @@ scan_entries() {
 
   local found_linux=0
 
+  # Slot B can only direct-boot its own kernel, so that is the main card; the rest go under Advanced options.
+  # shortcut: falls back to the last glob match (lexical, 7.2.9 sorts after 7.2.11), fine while Slot B matches an entry.
+  local primary="" running_kver cand_conf cand_k cand_v
+  running_kver=$(uname -r 2>/dev/null || true)
+  for cand_conf in "$BOOT_MNT"/loader/entries/*.conf; do
+    [[ -f "$cand_conf" && "$cand_conf" != *rescue* ]] || continue
+    while IFS=' ' read -r cand_k cand_v; do
+      [[ "$cand_k" == linux && -f "$BOOT_MNT/$cand_v" ]] && primary="$cand_conf"
+    done < "$cand_conf"
+    [[ "$primary" == "$cand_conf" && -n "$running_kver" && "$cand_conf" == *"$running_kver"* ]] && break
+  done
+
   # 1. Scan BootLoaderSpec (BLS) entries on /boot (/loader/entries/*.conf)
   if [[ -d "$BOOT_MNT/loader/entries" ]]; then
     for conf in "$BOOT_MNT"/loader/entries/*.conf; do
@@ -230,11 +240,16 @@ scan_entries() {
       local os_type
       os_type=$(detect_os_type "$title")
       local card_title="${title:-$OS_NAME}"
-      if [[ $found_linux -eq 0 ]]; then
+      local card_sub="KERNEL ${version} - DIRECT BOOT" group=0
+      if [[ "$conf" == "$primary" ]]; then
         card_title="$OS_NAME"
         os_type=$(detect_os_type "$OS_ID")
+      elif command -v kexec >/dev/null 2>&1; then
+        card_title="${title%% (*}" card_sub="KERNEL ${version} - KEXEC" group=1
+      else
+        card_title="${title%% (*}" card_sub="KERNEL ${version} - NEEDS KEXEC" group=2
       fi
-      echo "${id}|${card_title}|KERNEL ${version} - DIRECT BOOT|${os_type}|${needs_luks}|${ROOT_PART}|/usr/local/bin/googleboot-scan --boot ${id}"
+      echo "${id}|${card_title}|${card_sub}|${os_type}|${needs_luks}|${ROOT_PART}|/usr/local/bin/googleboot-scan --boot ${id}|${group}"
       echo "${id}|${BOOT_MNT}/${linux}|${BOOT_MNT}/${initrd}|${options}" >> "$STATE_FILE"
       found_linux=1
     done

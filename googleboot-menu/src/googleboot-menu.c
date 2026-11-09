@@ -106,6 +106,7 @@ struct drm_mode_fb_dirty_cmd {
 #endif
 
 #define MAX_ENTRIES 12
+#define ADVANCED_FOOTER "Arrow keys: Select kernel   •   Enter: Boot   •   Esc: Back"
 #define MAX_STR     512
 
 typedef struct {
@@ -120,6 +121,7 @@ typedef struct {
     bool needs_luks;
     char luks_dev[MAX_STR];
     char action_cmd[MAX_STR];
+    int group; /* 0 main row, 1 Advanced options, 2 Advanced options but unbootable */
 } boot_entry_t;
 
 typedef struct {
@@ -661,6 +663,12 @@ static void draw_google_four_color_bar(canvas_t *cv, float cx, float cy, float s
     }
 }
 
+/* Shrink a label to fit its card instead of letting it run over the neighbours. */
+static float fit_px(const char *s, float px, float tracking, float max_w) {
+    float w = measure_text_gs(s, px, tracking);
+    return w > max_w ? px * max_w / w : px;
+}
+
 /* Vector padlock icon for LUKS2 chip & modal header */
 static void draw_lock_icon(canvas_t *cv, float cx, float cy, float size, color_t col, color_t bg_hole) {
     color_t none = {0, 0, 0, 0};
@@ -895,8 +903,11 @@ static void render_ui(canvas_t *cv, const theme_config_t *t,
         prettify_label(entries[i].title, disp_title, sizeof(disp_title), false);
         prettify_label(entries[i].subtitle, disp_sub, sizeof(disp_sub), true);
 
-        draw_text_gs(cv, disp_title, x + cw * 0.5f, y + ch * 0.59f, 36.0f * sf, 1, t->text, 0.2f * sf);
-        draw_text_gs(cv, disp_sub,   x + cw * 0.5f, y + ch * 0.685f, 23.0f * sf, 1, t->subtext, 0.1f * sf);
+        float label_w = cw - 56.0f * sf;
+        draw_text_gs(cv, disp_title, x + cw * 0.5f, y + ch * 0.59f,
+                     fit_px(disp_title, 36.0f * sf, 0.2f * sf, label_w), 1, t->text, 0.2f * sf);
+        draw_text_gs(cv, disp_sub,   x + cw * 0.5f, y + ch * 0.685f,
+                     fit_px(disp_sub, 23.0f * sf, 0.1f * sf, label_w), 1, t->subtext, 0.1f * sf);
 
         /* Bottom Material 3 Pill Action Button */
         if (is_sel) {
@@ -904,7 +915,9 @@ static void render_ui(canvas_t *cv, const theme_config_t *t,
             float px = x + (cw - pw) * 0.5f;
             float py = y + ch - 88.0f * sf;
             draw_sdf_rounded_rect(cv, px, py, pw, ph, ph * 0.5f, t->accent, none, 0);
-            draw_text_gs(cv, "Boot", x + cw * 0.5f, py + 18.0f * sf, 26.0f * sf, 1, dark_text, 0.3f * sf);
+            const char *pill = strcmp(entries[i].id, "advanced") == 0 ? "Open"
+                               : entries[i].group == 2 ? "Unavailable" : "Boot";
+            draw_text_gs(cv, pill, x + cw * 0.5f, py + 18.0f * sf, 26.0f * sf, 1, dark_text, 0.3f * sf);
         } else {
             float pw = 180.0f * sf, ph = 50.0f * sf;
             float px = x + (cw - pw) * 0.5f;
@@ -1265,8 +1278,31 @@ static int save_png(const char *path, const canvas_t *cv) {
     return 0;
 }
 
+/* Fill view with the visible cards: older kernels sit behind one Advanced options card. */
+static int build_view(const boot_entry_t *all, int n, bool advanced, boot_entry_t *view) {
+    int c = 0, older = 0;
+    for (int i = 0; i < n; i++) if (all[i].group) older++;
+    for (int i = n - 1; advanced && i >= 0; i--) /* newest first */
+        if (all[i].group) view[c++] = all[i];
+    for (int i = 0; !advanced && i < n; i++) {
+        if (all[i].group) continue;
+        view[c++] = all[i];
+        if (c == 1 && older && c < MAX_ENTRIES) {
+            boot_entry_t *e = &view[c++];
+            memset(e, 0, sizeof(*e));
+            snprintf(e->id, sizeof(e->id), "advanced");
+            snprintf(e->title, sizeof(e->title), "Advanced options for %.90s", all[i].title);
+            snprintf(e->subtitle, sizeof(e->subtitle), "%d older kernel%s", older, older == 1 ? "" : "s");
+            snprintf(e->os_type, sizeof(e->os_type), "%s", all[i].os_type);
+        }
+        if (c == MAX_ENTRIES) break;
+    }
+    return c;
+}
+
 static int load_boot_entries(boot_entry_t *entries, int max_entries, const char *entries_file, bool is_preview) {
     FILE *fp = NULL;
+    memset(entries, 0, sizeof(*entries) * (size_t)max_entries);
     if (entries_file && access(entries_file, R_OK) == 0) {
         fp = fopen(entries_file, "r");
     } else if (!is_preview && access("/usr/local/bin/googleboot-scan", X_OK) == 0) {
@@ -1297,6 +1333,8 @@ static int load_boot_entries(boot_entry_t *entries, int max_entries, const char 
             snprintf(e->luks_dev, sizeof(e->luks_dev), "%s", tok ? tok : "");
             tok = strsep(&fields, "|");
             snprintf(e->action_cmd, sizeof(e->action_cmd), "%s", tok ? tok : "");
+            tok = strsep(&fields, "|");
+            e->group = tok ? atoi(tok) : 0;
             count++;
         }
         if (entries_file && access(entries_file, R_OK) == 0) fclose(fp);
@@ -1372,13 +1410,14 @@ int main(int argc, char **argv) {
     const char *gbb_path = NULL;
     const char *disk_path = "/dev/nvme0n1";
     bool slot_reboot = false;
-    bool modal_preview = false;
+    bool modal_preview = false, advanced = false;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--theme") == 0 && i + 1 < argc) theme_path = argv[++i];
         else if (strcmp(argv[i], "--preview") == 0 && i + 1 < argc) preview_png = argv[++i];
         else if (strcmp(argv[i], "--entries") == 0 && i + 1 < argc) entries_file = argv[++i];
         else if (strcmp(argv[i], "--preview-luks") == 0) modal_preview = true;
+        else if (strcmp(argv[i], "--preview-advanced") == 0) advanced = true;
         else if (strcmp(argv[i], "--switch-slot") == 0 && i + 1 < argc) slot_mode = argv[++i];
         else if (strcmp(argv[i], "--set-gbb-short-delay") == 0 && i + 1 < argc) gbb_path = argv[++i];
         else if (strcmp(argv[i], "--disk") == 0 && i + 1 < argc) disk_path = argv[++i];
@@ -1396,8 +1435,9 @@ int main(int argc, char **argv) {
     init_default_theme(&theme);
     load_theme_config(&theme, theme_path);
 
-    boot_entry_t entries[MAX_ENTRIES];
-    int count = load_boot_entries(entries, MAX_ENTRIES, entries_file, preview_png != NULL);
+    boot_entry_t all_entries[MAX_ENTRIES], entries[MAX_ENTRIES];
+    int all_count = load_boot_entries(all_entries, MAX_ENTRIES, entries_file, preview_png != NULL);
+    int count = build_view(all_entries, all_count, advanced, entries);
 
     if (preview_png) {
         canvas_t cv = {
@@ -1407,7 +1447,8 @@ int main(int argc, char **argv) {
             .pixels = calloc(2880 * 1800, sizeof(uint32_t))
         };
         render_ui(&cv, &theme, entries, count, 0,
-                  theme.timeout_sec, true, modal_preview, modal_preview ? "hunter22" : "", "");
+                  theme.timeout_sec, true, modal_preview, modal_preview ? "hunter22" : "",
+                  advanced ? ADVANCED_FOOTER : "");
         save_png(preview_png, &cv);
         free(cv.pixels);
         printf("Rendered 2880x1800 preview to %s\n", preview_png);
@@ -1524,6 +1565,7 @@ int main(int argc, char **argv) {
     time_t last_tick = time(NULL);
 
     while (1) {
+        if (advanced && !luks_modal && !status_msg[0]) snprintf(status_msg, sizeof(status_msg), ADVANCED_FOOTER);
         render_ui(&cv, &theme, entries, count, selected,
                   remaining, timer_active, luks_modal, luks_pass, status_msg);
         memcpy(fb_map, cv.pixels, creq.size);
@@ -1566,11 +1608,27 @@ int main(int argc, char **argv) {
                         if (ev.code == KEY_LEFT || ev.code == KEY_UP) selected = (selected - 1 + count) % count;
                         else if (ev.code == KEY_RIGHT || ev.code == KEY_DOWN || ev.code == KEY_TAB) selected = (selected + 1) % count;
                         else if (ev.code >= KEY_1 && ev.code <= KEY_9) { int idx = ev.code - KEY_1; if (idx < count) selected = idx; }
-                        else if (ev.code == KEY_R) { count = load_boot_entries(entries, MAX_ENTRIES, entries_file, false); if (selected >= count) selected = count - 1; }
+                        else if (ev.code == KEY_R) {
+                            all_count = load_boot_entries(all_entries, MAX_ENTRIES, entries_file, false);
+                            advanced = false;
+                            count = build_view(all_entries, all_count, false, entries);
+                            selected = 0;
+                        }
                         else if (ev.code == KEY_ENTER || ev.code == KEY_KPENTER) {
-                            if (entries[selected].needs_luks) { luks_modal = true; luks_pass[0] = '\0'; status_msg[0] = '\0'; }
+                            if (strcmp(entries[selected].id, "advanced") == 0) {
+                                advanced = true;
+                                count = build_view(all_entries, all_count, true, entries);
+                                selected = 0;
+                            } else if (entries[selected].group == 2) {
+                                snprintf(status_msg, sizeof(status_msg), "This kernel needs kexec, which is not in this boot image");
+                            } else if (entries[selected].needs_luks) { luks_modal = true; luks_pass[0] = '\0'; status_msg[0] = '\0'; }
                             else goto do_boot;
-                        } else if (ev.code == KEY_ESC) return 0;
+                        } else if (ev.code == KEY_ESC) {
+                            if (!advanced) return 0;
+                            advanced = false;
+                            count = build_view(all_entries, all_count, false, entries);
+                            selected = 0;
+                        }
                     } else {
                         if (ev.code == KEY_ESC) { luks_modal = false; luks_pass[0] = '\0'; status_msg[0] = '\0'; }
                         else if (ev.code == KEY_BACKSPACE) { size_t l = strlen(luks_pass); if (l > 0) luks_pass[l - 1] = '\0'; }

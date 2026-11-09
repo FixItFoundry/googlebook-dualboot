@@ -488,6 +488,11 @@ for sync_script in \
       cp -f "$SELF_DIR/bin/googlebook-restore-slotb" "$W/unpacked/usr/local/bin/googlebook-restore-slotb"
       chmod 755 "$W/unpacked/usr/local/bin/googlebook-restore-slotb"
     fi
+    # Distro add-ons (e.g. the Fedomakase branch) put extra sync steps here.
+    if [[ -d /etc/googlebook/sysroot-sync.d ]]; then
+      mkdir -p "$W/unpacked/etc/googlebook"
+      cp -a /etc/googlebook/sysroot-sync.d "$W/unpacked/etc/googlebook/"
+    fi
     cat > "$W/unpacked/etc/systemd/system/googlebook-sysroot-sync.service" << 'SYNCSVCEOF'
 [Unit]
 Description=GoogleBook Moonstone Sysroot Hardware & Module Sync
@@ -576,16 +581,17 @@ if [[ ! -f "$HOOK" ]]; then
 EOF
   chmod +x "$HOOK"
 fi
+# Rewritten every run so existing installs pick up hook fixes.
 POSTINST=/etc/kernel/postinst.d/zz-googlebook-slotb
-if [[ ! -f "$POSTINST" ]]; then
-  mkdir -p /etc/kernel/postinst.d
-  cat > "$POSTINST" <<'EOF'
+mkdir -p /etc/kernel/postinst.d
+cat > "$POSTINST" <<'EOF'
 #!/bin/sh
 # Refresh Googlebook Slot B (depthcharge) on Debian/Ubuntu kernel install
+# kernel-install already ran 95-googlebook-slotb.install (Fedora's 95-kernel-hooks, systemd-boot); don't pack twice.
+[ -n "$KERNEL_INSTALL_MACHINE_ID" ] && exit 0
 [ -n "$1" ] && /usr/local/bin/googlebook-pack-slotb "$1" || true
 EOF
-  chmod +x "$POSTINST"
-fi
+chmod +x "$POSTINST"
 if command -v pacman >/dev/null 2>&1 || [[ -d /etc/pacman.d ]]; then
   PACMAN_HOOK=/etc/pacman.d/hooks/95-googlebook-slotb.hook
   if [[ ! -f "$PACMAN_HOOK" ]]; then

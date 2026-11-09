@@ -426,8 +426,8 @@ sync
 
 # Set Slot B active (priority=2, successful=1) and Slot A as valid fallback (priority=1, successful=1)
 if command -v sgdisk >/dev/null 2>&1; then
-  sgdisk --attributes=15:=0101000000000000 --attributes=16:=0102000000000000 \
-         --attributes=13:=0101000000000000 --attributes=14:=0102000000000000 /dev/nvme0n1 >/dev/null
+  sgdisk --attributes=15:=:0101000000000000 --attributes=16:=:0102000000000000 \
+         --attributes=13:=:0101000000000000 --attributes=14:=:0102000000000000 /dev/nvme0n1 >/dev/null
 elif [ -x /usr/local/bin/googleboot-menu ]; then
   /usr/local/bin/googleboot-menu --switch-slot b --disk /dev/nvme0n1 >/dev/null
 else

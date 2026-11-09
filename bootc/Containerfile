@@ -62,19 +62,28 @@ FROM ${BASE_IMAGE}
 LABEL org.opencontainers.image.title="Fedora bootc for Acer Googlebook 14 (Moonstone)"
 LABEL org.opencontainers.image.description="Depthcharge Slot B bootable Fedora bootc image for the Acer Googlebook 14 GP714-91N (board Moonstone / Google_Fatcat)"
 
-# Nothing to install: dracut, mkbootimg, kexec, sgdisk and zstd - everything the packer
-# needs - are already in the base image. keyd would belong here too, but Fedora 44 does not
-# package it (only the unrelated keydb), so the Vivaldi top row is handled by
+# Almost nothing to install: dracut, mkbootimg, kexec, sgdisk and zstd - everything the
+# packer needs - are already in the base image. keyd would belong here too, but Fedora 44
+# does not package it (only the unrelated keydb), so the Vivaldi top row is handled by
 # 61-googlebook-moonstone.hwdb plus the EVIOCSKEYCODE pass in googlebook-gpu-init.
 # /etc/keyd/cros.conf still ships, so installing keyd from COPR later needs no changes.
+
+# The exception, and it is not optional. A deployment mounts /usr through
+# ostree-prepare-root, which reaches the Slot B initramfs only through the dracut "ostree"
+# module. Both live in the ostree *package*, and a trimmed base image can satisfy bootc with
+# ostree-libs alone - bootc links against libostree and `bootc container lint` passes, so
+# the image builds, deploys and boots, and nothing mounts /usr. Observed on this machine:
+# "package ostree is not installed" inside a deployment that had /ostree/deploy, boot
+# entries carrying ostree=, and no /usr/lib/ostree at all. Slot B then packs cleanly and
+# switch-root lands in the bare subvolume, running whatever userspace was there before with
+# nothing logged anywhere.
 #
-# One thing the base image must keep providing is the dracut "ostree" module, which is what
-# puts ostree-prepare-root into the Slot B initramfs - the only thing that mounts /usr as a
-# composefs. 92-googlebook-bootc.conf names it in add_dracutmodules and
-# force_add_dracutmodules (dracut --hostonly drops it when a pack runs from an installer
-# chroot), and install-googlebook-layer.sh fails this build if the module, the binary or
-# that force-add line is missing. Without them the image still builds and Slot B still
-# boots - into the bare subvolume and whatever userspace was there before, silently.
+# Installing it here rather than asserting the base provides it, because the base is a
+# moving target and this costs one small package. install-googlebook-layer.sh then checks
+# that the dracut module, the binary and the force-add line in 92-googlebook-bootc.conf all
+# arrived, so if a future ostree package ever stops shipping the module the build fails
+# instead of producing an image whose Slot B boots the wrong userspace.
+RUN dnf -y install ostree && dnf clean all
 
 COPY --from=build /out/extra            /tmp/googlebook-mods/extra
 COPY --from=build /out/updates          /tmp/googlebook-mods/updates

@@ -656,6 +656,22 @@ holds a pre-migration OS, the machine boots it, successfully, with nothing logge
 same end state as the section above on booting the pre-migration OS, reached by a different
 route.
 
+There is a blunter cause, and it is the one that hit this machine: the deployed image had
+no `ostree` **package**. `bootc` links against `libostree`, so a trimmed base that carries
+only `ostree-libs` satisfies it — the image builds, `bootc container lint` passes, the
+install deploys, `/ostree/deploy` and `ostree=` boot entries all appear, and `/usr/lib/ostree`
+does not exist. Check a base before building on it:
+
+```bash
+podman run --rm ghcr.io/dsmk/bootc-image-laptop:main \
+  sh -c 'rpm -q ostree; ls -d /usr/lib/dracut/modules.d/*ostree'
+```
+
+[`bootc/Containerfile`](../bootc/Containerfile) now installs `ostree` itself rather than
+trusting the base for it. Note what the symptom was *not*: the packer reported missing
+composefs modules while `erofs` and `overlay` were both present and probe-installable,
+because those arrive through `instmods` and never needed the module.
+
 The module is now pinned along the same three independent paths `erofs` and `overlay` are:
 
 - [`92-googlebook-bootc.conf`](../bootc/configs/usr/lib/dracut/dracut.conf.d/92-googlebook-bootc.conf)

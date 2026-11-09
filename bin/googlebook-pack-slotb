@@ -305,11 +305,38 @@ fi
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
 
+# An ostree deployment needs the dracut "ostree" module, and --hostonly is what takes it
+# away. That module's check() probes the running system, so packing from an installer or
+# live chroot - the one case where the machine cannot pack itself - shows it the installer's
+# /run and /proc rather than an ostree-booted system, and dracut drops it silently. The
+# archive check below catches the result, but only after a five-minute build; --force-add is
+# dracut's override for modules that -H probing would discard. Passed only when the module
+# is really present, because dracut fails the whole run on a force-add it cannot resolve,
+# and a module that is simply absent is a broken image - worth saying so in those words.
+FORCE_ADD=()
+if (( OSTREE_DEPLOY )); then
+  OSTREE_DMOD=$(ls -d /usr/lib/dracut/modules.d/*ostree 2>/dev/null | head -1)
+  if [[ -n "$OSTREE_DMOD" ]]; then
+    FORCE_ADD=(--force-add ostree)
+    log "forcing dracut module $(basename "$OSTREE_DMOD") past hostonly probing"
+  else
+    log "ERROR: no ostree dracut module under /usr/lib/dracut/modules.d"
+    log "  This deployment mounts /usr as a composefs and only that module puts"
+    log "  ostree-prepare-root in the initramfs. Packing now would write a Slot B that"
+    log "  boots whatever userspace is in the bare subvolume, with nothing logged."
+    log "  Rebuild the image from bootc/Containerfile, which ships the module. Do not copy"
+    log "  one into this deployment: its /usr is hardlinked into /ostree/repo, so editing a"
+    log "  file in place corrupts that object for every deployment sharing it."
+    exit 1
+  fi
+fi
+
 # --- build hostonly initramfs omitting blacklisted GPU/Wi-Fi/BT/Audio firmware so it fits in Slot B ---
 # --tmpdir: dracut defaults to /var/tmp, which does not exist on an image-based system
 # until systemd-tmpfiles has run - so not inside a deployment chroot, and not in a
 # container. $W is already a private mktemp -d and is cleaned up by the EXIT trap.
 dracut -f --hostonly --no-early-microcode --kver "$KVER" --tmpdir "$W" ${KMODDIR_ARGS[@]+"${KMODDIR_ARGS[@]}"} \
+  ${FORCE_ADD[@]+"${FORCE_ADD[@]}"} \
   --omit-drivers "i915 xe amdgpu radeon nouveau cxgb4 iwlwifi iwlmld btintel btintel_pcie bluetooth cfg80211 mac80211 snd snd_sof snd_sof_pci_intel_ptl soundwire_bus intel_vpu" \
   --add-drivers "nvme nvme_core btrfs uas usb_storage coreboot_table framebuffer-coreboot cros_ec cros_ec_lpcs cros_ec_keyb erofs overlay loop" \
   --filesystems "erofs overlay" \
@@ -346,14 +373,15 @@ if (( OSTREE_DEPLOY )); then
     grep -q "/$m\.ko" "$CFS_LIST" || cfs_missing="$cfs_missing $m"
   done
   # The modules are useless if nothing runs ostree-prepare-root. It is pulled in only by the
-  # symlink the 50ostree dracut module drops into initrd-root-fs.target.wants, and its
-  # absence is silent in a way the composefs failure is not: with no unit there is no
+  # symlink the ostree dracut module drops into initrd-root-fs.target.wants (.requires on
+  # some ostree versions, so either is accepted). Its absence is silent in a way the
+  # composefs failure is not: with no unit there is no
   # OnFailure=emergency.target, systemd mounts root=/rootflags= from the command line, and
   # switch-root lands in the bare subvolume. Since "bootc install to-existing-root" leaves
   # the previous OS's files in that subvolume, the machine boots happily into the OLD
   # userspace with nothing logged anywhere. Assert the symlink, not just the binary.
-  if ! grep -q 'initrd-root-fs\.target\.wants/ostree-prepare-root\.service' "$CFS_LIST"; then
-    cfs_missing="$cfs_missing ostree-prepare-root.service(initrd-root-fs.target.wants)"
+  if ! grep -qE 'initrd-root-fs\.target\.(wants|requires)/ostree-prepare-root\.service' "$CFS_LIST"; then
+    cfs_missing="$cfs_missing ostree-prepare-root.service(initrd-root-fs.target.wants|.requires)"
   fi
   if [[ -n "$cfs_missing" ]]; then
     log "ERROR: initramfs is missing composefs module(s):$cfs_missing"
@@ -371,6 +399,14 @@ if (( OSTREE_DEPLOY )); then
     done
     log "    initramfs lists $(wc -l < "$CFS_LIST") entries, $(grep -c '\.ko' "$CFS_LIST") of them modules"
     log "    add_drivers in effect: $(sed -n 's/^add_drivers+=//p' /etc/dracut.conf.d/90-googlebook-slotb.conf 2>/dev/null)"
+    # Which of the two shapes this is: no module to install, or a module dracut refused.
+    log "    ostree dracut module: ${OSTREE_DMOD:-NOT PRESENT under /usr/lib/dracut/modules.d}"
+    if [[ -s "$W/dracut.log" ]] && grep -qi ostree "$W/dracut.log"; then
+      log "    what dracut said about it:"
+      grep -i ostree "$W/dracut.log" | head -10 | sed 's/^/      /' || true
+    else
+      log "    dracut never mentioned ostree - the module was not even considered"
+    fi
     # Ask dracut-install directly, in this same environment, with the same omit regex
     # dracut would have used. This separates "dracut never tried" from "dracut tried and
     # the module was rejected", which is the whole question and cannot be guessed from here.

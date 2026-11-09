@@ -37,6 +37,20 @@ for want in coreboot_table framebuffer-coreboot; do
     || { echo "FATAL: $want not resolvable for $KVER after depmod" >&2; exit 1; }
 done
 
+# --- the dracut module that mounts /usr at boot ---------------------------------------
+# /usr on this image is a composefs, and only ostree-prepare-root mounts it. It reaches the
+# Slot B initramfs through the dracut "ostree" module, which 92-googlebook-bootc.conf names
+# in add_dracutmodules and force_add_dracutmodules. If a base image ever stops shipping it,
+# the failure is the quiet kind: every pack still succeeds, Slot B still boots, and
+# switch-root lands in the bare subvolume running whatever userspace was there before, with
+# nothing logged anywhere. Fail the build rather than ship that.
+ls -d /usr/lib/dracut/modules.d/*ostree >/dev/null 2>&1 \
+  || { echo "FATAL: no ostree dracut module in this image; Slot B would boot the wrong userspace" >&2; exit 1; }
+test -x /usr/lib/ostree/ostree-prepare-root \
+  || { echo "FATAL: /usr/lib/ostree/ostree-prepare-root missing; nothing would mount /usr" >&2; exit 1; }
+grep -q 'force_add_dracutmodules.*ostree' /usr/lib/dracut/dracut.conf.d/92-googlebook-bootc.conf \
+  || { echo "FATAL: 92-googlebook-bootc.conf no longer forces the ostree dracut module" >&2; exit 1; }
+
 # --- ALSA UCM: anchor the SpeakerCodec1 regex so rt721 does not also match rt7210 etc. --
 if [[ -f /usr/share/alsa/ucm2/sof-soundwire/rt721.conf ]]; then
   sed -i 's/Regex "(rt721(-sdca)?)"/Regex "^(rt721(-sdca)?)$"/' \

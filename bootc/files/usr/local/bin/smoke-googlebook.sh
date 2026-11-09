@@ -72,6 +72,16 @@ check "omit list is not shadowed by a packer-written /etc copy" \
   sh -c '! test -f /etc/dracut.conf.d/92-googlebook-bootc.conf'
 check "clevis is omitted" \
   grep -q 'clevis' /usr/lib/dracut/dracut.conf.d/92-googlebook-bootc.conf
+# Only the dracut "ostree" module puts ostree-prepare-root.service into the initramfs, and
+# --hostonly probing drops it whenever a pack runs from an installer chroot. Without it Slot
+# B still boots - into the bare subvolume and the previous userspace, silently - so these
+# are checked the same way the erofs/overlay pinning is.
+check "ostree dracut module present" \
+  sh -c 'ls -d /usr/lib/dracut/modules.d/*ostree >/dev/null 2>&1'
+check "ostree-prepare-root present" \
+  test -x /usr/lib/ostree/ostree-prepare-root
+check "ostree dracut module forced past hostonly probing" \
+  grep -qE 'force_add_dracutmodules.*ostree' /usr/lib/dracut/dracut.conf.d/92-googlebook-bootc.conf
 check "coreboot framebuffer autoload present" \
   test -f /usr/lib/modules-load.d/googlebook-coreboot-fb.conf
 check "staged Xe2 modprobe rules present" \
@@ -122,6 +132,13 @@ else
   check "ostree deployment marker" test -f /run/ostree-booted
   check "an ostree boot entry carries ostree=" \
     sh -c 'grep -qs "ostree=" /boot/loader/entries/*.conf'
+  # The packer saves the listing of the archive it wrote. This is the only check here that
+  # covers the Slot B image actually on the device rather than the inputs to the next pack.
+  if [ -f /boot/slotb-backup/initramfs.list ]; then
+    check "packed Slot B initramfs runs ostree-prepare-root" \
+      grep -qE 'initrd-root-fs\.target\.(wants|requires)/ostree-prepare-root\.service' \
+      /boot/slotb-backup/initramfs.list
+  fi
   check "slotb-sync state directory" test -d /var/lib/googlebook
   # An in-place migration can leave files in /etc with no SELinux label. Confined domains
   # cannot even getattr an unlabeled_t file, so this surfaces as "Permission denied" from

@@ -67,6 +67,14 @@ LABEL org.opencontainers.image.description="Depthcharge Slot B bootable Fedora b
 # package it (only the unrelated keydb), so the Vivaldi top row is handled by
 # 61-googlebook-moonstone.hwdb plus the EVIOCSKEYCODE pass in googlebook-gpu-init.
 # /etc/keyd/cros.conf still ships, so installing keyd from COPR later needs no changes.
+#
+# One thing the base image must keep providing is the dracut "ostree" module, which is what
+# puts ostree-prepare-root into the Slot B initramfs - the only thing that mounts /usr as a
+# composefs. 92-googlebook-bootc.conf names it in add_dracutmodules and
+# force_add_dracutmodules (dracut --hostonly drops it when a pack runs from an installer
+# chroot), and install-googlebook-layer.sh fails this build if the module, the binary or
+# that force-add line is missing. Without them the image still builds and Slot B still
+# boots - into the bare subvolume and whatever userspace was there before, silently.
 
 COPY --from=build /out/extra            /tmp/googlebook-mods/extra
 COPY --from=build /out/updates          /tmp/googlebook-mods/updates

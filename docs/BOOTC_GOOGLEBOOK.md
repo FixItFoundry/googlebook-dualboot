@@ -636,6 +636,55 @@ field:
   `add_drivers`, the `filesystems+=` copies still land)
 - a pack-time refusal that lists the generated archive and checks both are in it
 
+**`ERROR: initramfs is missing composefs module(s):
+ostree-prepare-root.service(initrd-root-fs.target.wants)`, with `erofs` and `overlay` both
+reported present.** A different fault from the one above, and the modules are a red
+herring — the missing item is the unit symlink, which only the dracut `ostree` module
+installs. Dracut built the initramfs without that module.
+
+The usual cause is packing from an installer or live environment.
+`googlebook-pack-slotb` runs dracut `--hostonly`, and a module's `check()` probes the
+*running* system — which inside a chroot is the installer, with its `/run` and `/proc`
+bind-mounted in. That is not an ostree boot, so the module is dropped. The packer's own
+detection does not notice, because it falls back to `/ostree/deploy`
+([`bin/googlebook-pack-slotb:34`](../bin/googlebook-pack-slotb)).
+
+This failure is worse than a boot failure. With no `ostree-prepare-root.service` there is
+no `OnFailure=emergency.target` and nothing to fail: systemd mounts `root=`/`rootflags=`
+from the command line and switch-root lands in the bare subvolume. If that subvolume still
+holds a pre-migration OS, the machine boots it, successfully, with nothing logged — the
+same end state as the section above on booting the pre-migration OS, reached by a different
+route.
+
+The module is now pinned along the same three independent paths `erofs` and `overlay` are:
+
+- [`92-googlebook-bootc.conf`](../bootc/configs/usr/lib/dracut/dracut.conf.d/92-googlebook-bootc.conf)
+  names `ostree` in `add_dracutmodules` **and** `force_add_dracutmodules`. `--force-add` is
+  dracut's documented override for modules that `-H` probing would drop, so it survives the
+  chroot case and a base image that stops carrying `20-bootc-base.conf`. `bootc` is left to
+  the base image's own drop-in: its module name is the base's to define, and a force-add
+  dracut cannot resolve fails the whole run.
+- `googlebook-pack-slotb` passes `--force-add ostree` itself whenever it detects an ostree
+  deployment and finds the module under `/usr/lib/dracut/modules.d`. A deployment made from
+  an older image is therefore packable without editing anything on it. If the module is not
+  there, the packer refuses before building rather than after, and says why.
+- `install-googlebook-layer.sh` fails the build when the module, the
+  `/usr/lib/ostree/ostree-prepare-root` binary, or the force-add line is missing, and
+  `smoke-googlebook.sh` re-checks all three — plus, on a booted deployment,
+  `/boot/slotb-backup/initramfs.list`, which is the listing of the image actually on the
+  device rather than of the inputs to the next pack.
+
+The pack-time assertion now accepts the symlink in either `initrd-root-fs.target.wants` or
+`initrd-root-fs.target.requires`, since ostree has used both.
+
+If the packer still refuses, read its diagnosis: it prints the module directory it found
+and every line the dracut log has about `ostree`, which separates "no module to install"
+from "a module dracut refused". No module directory at all means the deployed image is
+incomplete — rebuild it from [`bootc/Containerfile`](../bootc/Containerfile). Do not
+hand-copy a dracut module into a deployment's `/usr`, writable though it is from a chroot:
+the checkout is hardlinked into `/ostree/repo`, and editing a file in place corrupts that
+object for every deployment sharing it.
+
 **The packer also now checks dracut's exit status.** It previously ran
 
 ```bash

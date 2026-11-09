@@ -240,7 +240,12 @@ ln -sf ../googlebook-gpu-init.service /sysroot/etc/systemd/system/multi-user.tar
 ln -sf ../googlebook-gpu-init.service /sysroot/etc/systemd/system/graphical.target.wants/googlebook-gpu-init.service
 fi
 
-# Distro add-on steps packed in by googlebook-pack-slotb from /etc/googlebook/sysroot-sync.d.
+# Distro add-on steps packed in by googlebook-pack-slotb from /usr/lib/googlebook/sysroot-sync.d
+# and /etc/googlebook/sysroot-sync.d. Every copy above this point is gated on SYSROOT_USR_RW
+# because /sysroot/usr is a read-only composefs on an ostree deployment; export that verdict
+# so a step can make the same decision instead of failing a write it was never going to be
+# allowed to make, and report a failure that is not one.
+export SYSROOT_USR_RW SYSROOT_OSTREE
 for step in /etc/googlebook/sysroot-sync.d/*; do
   [ -x "$step" ] && { "$step" || echo "[googlebook-sysroot-sync] $step failed" >&2; }
 done

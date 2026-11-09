@@ -305,9 +305,28 @@ only differences are where the tools live and the one extra step after an upgrad
 
 ### From the graphical `googleboot-menu` bootloader
 
-Unchanged. At every Slot B boot, `googleboot-menu` renders the `2880x1800` selector where
-you choose **Fedora / Linux** (with LUKS2 unlock) or **Googlebook OS** (a one-shot reboot
-into Slot A that keeps Slot B as the default next boot).
+At every Slot B boot, `googleboot-menu` renders the `2880x1800` selector where you choose
+**Fedora / Linux** (with LUKS2 unlock) or **Googlebook OS** (a one-shot reboot into Slot A
+that keeps Slot B as the default next boot).
+
+On a bootc system the other deployments appear too, under **Advanced options**, each as a
+kexec card — which is rollback from the boot menu, with no external computer. Two details
+of that are ostree-specific:
+
+- **The main card is the deployment that boots next**, picked the way
+  `googlebook-pack-slotb` picks it (`bls_default_entry`): the entry whose title ends in
+  `:0)`, else the highest `version`. ostree entry filenames carry no kernel version, so the
+  scanner's filename heuristic cannot find it, and plain glob order picks the wrong entry
+  once there are ten deployments — `ostree-10.conf` sorts before `ostree-2.conf`. The main
+  card must agree with what Slot B was packed for, or it offers to direct-boot a kernel
+  whose `ostree=` is not the one in `vendor_cmdline`.
+- **The card subtitle shows the kernel version, taken from the `vmlinuz-<kver>` basename.**
+  The BLS `version` field is not a kernel version on an ostree system; libostree writes
+  `n_deployments - index` there, so reading it would label every card `KERNEL 2`.
+
+Selecting the main card still direct-boots when Slot B's packed `ostree=` matches the
+entry, and falls back to one kexec with a message when it does not — the un-repacked
+upgrade case described below.
 
 The menu binary is part of the image at
 `/usr/local/share/googlebook-dualboot/googleboot-menu/bin/googleboot-menu`, symlinked to
@@ -358,6 +377,12 @@ that entry changing instead:
 |---|---|
 | `googlebook-slotb-sync.path` | Watches `/boot/loader.0/entries` and `/boot/loader.1/entries` |
 | `googlebook-slotb-sync.service` | Re-packs Slot B when the fingerprint of those entries changes |
+
+`googlebook-pack-slotb` writes no kernel hooks at all on an ostree deployment — neither
+`/etc/kernel/install.d/95-googlebook-slotb.install` nor the Debian `postinst.d` one, since
+no kernel ever arrives through a package transaction here. Writing them would only leave
+files in the deployment's `/etc` for ostree to carry through every future 3-way merge, for
+a code path that cannot run. The `.path` unit above is the whole mechanism.
 
 Both are enabled in the image. The `.path` unit deliberately watches the two real
 directories rather than `/boot/loader/entries`: ostree flips the `/boot/loader` symlink
@@ -439,6 +464,7 @@ OTA from Slot B to Slot A and puts Linux back in Slot B.
 | `/etc/keyd/cros.conf` | Vivaldi top-row remap, for a `keyd` installed from COPR; Fedora 44 does not package it, so on Fedora the top row is handled by the hwdb entry above plus the `EVIOCSKEYCODE` pass in `googlebook-gpu-init` |
 | `/usr/local/share/googlebook-dualboot/` | The whole toolkit, including module sources and `googleboot-menu` |
 | `/usr/local/bin/` | Symlinks for `googlebook-pack-slotb`, `-restore-slotb`, `-switch-slot`, `-sysroot-sync`, `googleboot-menu`, `googleboot-scan`, `boot-android` |
+| `/usr/lib/googlebook/sysroot-sync.d/` | Optional add-on steps for `googlebook-sysroot-sync`; the packer copies this and `/etc/googlebook/sysroot-sync.d` into the Slot B initramfs, `/etc` last so a local step overrides an image one of the same name. Steps run with `SYSROOT_USR_RW` and `SYSROOT_OSTREE` exported, so a step can skip a write to the read-only `/sysroot/usr` instead of failing it |
 
 The toolkit lives in `/usr/local/share` rather than `/var/usrlocal` because on
 `fedora-bootc` `/usr/local` is a real directory inside `/usr` — immutable, verity-backed

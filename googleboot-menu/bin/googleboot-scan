@@ -208,15 +208,47 @@ scan_entries() {
 
   # Slot B can only direct-boot its own kernel, so that is the main card; the rest go under Advanced options.
   # shortcut: falls back to the last glob match (lexical, 7.2.9 sorts after 7.2.11), fine while Slot B matches an entry.
-  local primary="" running_kver cand_conf cand_k cand_v
+  #
+  # That shortcut does not survive an ostree deployment. Its entries are named
+  # ostree-<n>[-<stateroot>].conf and carry no kernel version, so the uname match below never
+  # fires and lexical order decides - which is right only while there are fewer than ten
+  # deployments, because libostree sets n = n_deployments - index and ostree-10.conf sorts
+  # before ostree-2.conf. The deployment that boots next is index 0: the highest "version",
+  # with a title ending in ":0)". That is the rule googlebook-pack-slotb packs by
+  # (bls_default_entry), and the main card has to agree with it, or the big card offers to
+  # direct-boot a kernel whose ostree= is not the one in Slot B's vendor_cmdline.
+  local primary="" ost_primary="" ost_exact="" ost_best_v=-1 running_kver
+  local cand_conf cand_k cand_v c_title c_version c_options c_has_linux
   running_kver=$(uname -r 2>/dev/null || true)
   for cand_conf in "$BOOT_MNT"/loader/entries/*.conf; do
     [[ -f "$cand_conf" && "$cand_conf" != *rescue* ]] || continue
+    c_title="" c_version="" c_options="" c_has_linux=0
     while IFS=' ' read -r cand_k cand_v; do
-      [[ "$cand_k" == linux && -f "$BOOT_MNT/$cand_v" ]] && primary="$cand_conf"
+      case "$cand_k" in
+        linux)   [[ -f "$BOOT_MNT/$cand_v" ]] && c_has_linux=1 ;;
+        title)   c_title="$cand_v" ;;
+        version) c_version="$cand_v" ;;
+        options) c_options="$cand_v" ;;
+      esac
     done < "$cand_conf"
-    [[ "$primary" == "$cand_conf" && -n "$running_kver" && "$cand_conf" == *"$running_kver"* ]] && break
+    (( c_has_linux )) || continue
+    primary="$cand_conf"
+    case "$c_options" in
+      *ostree=*)
+        if [[ -z "$ost_exact" ]]; then
+          case "$c_title" in
+            *":0)")
+              ost_primary="$cand_conf" ost_exact=1 ;;
+            *)
+              if [[ "$c_version" =~ ^[0-9]+$ ]] && (( c_version > ost_best_v )); then
+                ost_best_v=$c_version ost_primary="$cand_conf"
+              fi ;;
+          esac
+        fi ;;
+    esac
+    [[ -z "$ost_primary" && -n "$running_kver" && "$cand_conf" == *"$running_kver"* ]] && break
   done
+  [[ -n "$ost_primary" ]] && primary="$ost_primary"
 
   # 1. Scan BootLoaderSpec (BLS) entries on /boot (/loader/entries/*.conf)
   if [[ -d "$BOOT_MNT/loader/entries" ]]; then
@@ -240,14 +272,23 @@ scan_entries() {
       local os_type
       os_type=$(detect_os_type "$title")
       local card_title="${title:-$OS_NAME}"
-      local card_sub="KERNEL ${version} - DIRECT BOOT" group=0
+      # "version" is a kernel version on a package-based install, but on an ostree
+      # deployment libostree writes n_deployments - index there, so every card would read
+      # "KERNEL 2". libostree always names the kernel vmlinuz-<kver>, so for those entries
+      # take the label off the basename instead.
+      local kver_label="$version"
+      case "$options" in
+        *ostree=*) [[ "${linux##*/}" == vmlinuz-* ]] && kver_label="${linux##*/vmlinuz-}" ;;
+      esac
+      kver_label="${kver_label^^}"
+      local card_sub="KERNEL ${kver_label} - DIRECT BOOT" group=0
       if [[ "$conf" == "$primary" ]]; then
         card_title="$OS_NAME"
         os_type=$(detect_os_type "$OS_ID")
       elif command -v kexec >/dev/null 2>&1; then
-        card_title="${title%% (*}" card_sub="KERNEL ${version} - KEXEC" group=1
+        card_title="${title%% (*}" card_sub="KERNEL ${kver_label} - KEXEC" group=1
       else
-        card_title="${title%% (*}" card_sub="KERNEL ${version} - NEEDS KEXEC" group=2
+        card_title="${title%% (*}" card_sub="KERNEL ${kver_label} - NEEDS KEXEC" group=2
       fi
       echo "${id}|${card_title}|${card_sub}|${os_type}|${needs_luks}|${ROOT_PART}|/usr/local/bin/googleboot-scan --boot ${id}|${group}"
       echo "${id}|${BOOT_MNT}/${linux}|${BOOT_MNT}/${initrd}|${options}" >> "$STATE_FILE"

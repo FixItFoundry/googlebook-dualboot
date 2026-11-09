@@ -524,11 +524,18 @@ for sync_script in \
       cp -f "$SELF_DIR/bin/googlebook-restore-slotb" "$W/unpacked/usr/local/bin/googlebook-restore-slotb"
       chmod 755 "$W/unpacked/usr/local/bin/googlebook-restore-slotb"
     fi
-    # Distro add-ons (e.g. the Fedomakase branch) put extra sync steps here.
-    if [[ -d /etc/googlebook/sysroot-sync.d ]]; then
-      mkdir -p "$W/unpacked/etc/googlebook"
-      cp -a /etc/googlebook/sysroot-sync.d "$W/unpacked/etc/googlebook/"
-    fi
+    # Distro add-ons (e.g. the Fedomakase branch) put extra sync steps here. /usr is read
+    # first so an image-based system can ship them where image content belongs: on a bootc
+    # deployment /usr is carried by the image itself, while /etc goes through ostree's
+    # 3-way merge on every upgrade. Both land at the same path in the initramfs, /etc last
+    # so a local step still overrides one of the same name from the image.
+    mkdir -p "$W/unpacked/etc/googlebook/sysroot-sync.d"
+    for sync_d in /usr/lib/googlebook/sysroot-sync.d /etc/googlebook/sysroot-sync.d; do
+      [[ -d "$sync_d" ]] || continue
+      cp -a "$sync_d/." "$W/unpacked/etc/googlebook/sysroot-sync.d/"
+    done
+    # Ship nothing rather than an empty directory when neither source exists.
+    rmdir "$W/unpacked/etc/googlebook/sysroot-sync.d" "$W/unpacked/etc/googlebook" 2>/dev/null || true
     cat > "$W/unpacked/etc/systemd/system/googlebook-sysroot-sync.service" << 'SYNCSVCEOF'
 [Unit]
 Description=GoogleBook Moonstone Sysroot Hardware & Module Sync
@@ -605,7 +612,17 @@ if [[ -d /boot ]]; then
   log "saved Slot B backup to /boot/slotb-backup"
 fi
 
-# kernel-install (Fedora/systemd) & postinst.d (Ubuntu/Debian) hooks so kernel updates refresh Slot B
+# kernel-install (Fedora/systemd) & postinst.d (Ubuntu/Debian) hooks so kernel updates refresh Slot B.
+# Neither can fire on an image-based system: a kernel arrives there as a staged deployment
+# rather than as a package transaction, and googlebook-slotb-sync.path repacks off the change
+# to the Boot Loader Specification entries instead. Writing them anyway leaves files in the
+# deployment's /etc - carried through every future ostree 3-way merge - for a code path that
+# never runs. Nothing follows this section, so skipping it ends the run.
+if (( OSTREE_DEPLOY )); then
+  log "ostree deployment; kernel updates are repacked by googlebook-slotb-sync.path"
+  log "done"
+  exit 0
+fi
 HOOK=/etc/kernel/install.d/95-googlebook-slotb.install
 if [[ ! -f "$HOOK" ]]; then
   mkdir -p /etc/kernel/install.d

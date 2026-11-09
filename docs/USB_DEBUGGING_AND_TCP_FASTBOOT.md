@@ -14,11 +14,11 @@ Unlike phones or tablets, the Acer Googlebook 14's USB-C ports are **USB Host po
 | Mode | Standard USB-C to USB-C Cable | Standard **USB 3.x USB-A (PC) to USB-C** Cable | Active **Host-to-Host Bridge Cable** (`067b:27a7` Prolific PL27A1 / `18d1:5084`) | **Wi-Fi ADB + USB-C Ethernet** (`--adb` / `tcp:<IP>:5554`) |
 | :--- | :---: | :---: | :---: | :---: |
 | **OS ADB** (Googlebook OS) | No | **Yes** (via Intel xHCI `DbC` `18d1:5087`) | **Yes** | **Yes (Wireless ADB)** |
-| **Bootloader Fastboot** (`depthcharge`) | No | No (`depthcharge` has no `DbC` driver) | **Yes** | **Yes (TCP `:5554` over Ethernet)** |
+| **Bootloader Fastboot** (`depthcharge`) | No | No (`depthcharge` has no `DbC` driver) | Not working (known issue; see below) | **Yes (TCP `:5554` over Ethernet)** |
 
 - **Easiest Setup (No Special USB Cable Needed):** Use **Wireless Debugging** (`adb pair`) inside Googlebook OS + a standard **USB-C Ethernet adapter** (`tcp:<ETH_IP>:5554`) for bootloader Fastboot.
 - **If you want wired USB ADB in Googlebook OS:** Use a **USB 3.x (5 Gbps+) USB-A (on PC) to USB-C (on Googlebook)** cable (uses Intel xHCI Debug Capability `18d1:5087` via `/vendor/bin/adb-usb-bridge`).
-- **If you want wired USB Fastboot in the Bootloader:** Requires an active **USB 3.0 Host-to-Host bridge cable** (`067b:27a7` Prolific PL27A1/PL27A7 or `18d1:5084` Google ALink).
+- **Bootloader Fastboot over USB does not currently work.** Depthcharge contains a USB path for Host-to-Host bridge cables (`067b:27a7` Prolific PL27A1/PL27A7 or `18d1:5084` Google ALink; see section 4A), but it has not worked on the Googlebook so far. Use a USB-C Ethernet adapter; the bootloader has no Wi-Fi either.
 
 ---
 

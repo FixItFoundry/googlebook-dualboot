@@ -590,26 +590,63 @@ done
 
 # Save backup copy of Slot B images & restore wrapper onto /boot (p11, unencrypted ext4)
 # for restoring Linux Slot B (and promoting Android OTAs via googlebook-restore-slotb).
+#
+# Two things this has to get right, both learned the hard way on a bootc machine.
+#
+# bootc mounts /boot read-only, so the copy fails with "cannot remove ...: Read-only file
+# system" unless it is remounted first. Remount it here and put it back exactly as found,
+# rather than asking the caller to do it: this runs unattended from
+# googlebook-slotb-sync.path after every image upgrade.
+#
+# And nothing from here on may fail the run. The three partitions are written and
+# sha256-verified by this point, so a backup that cannot be saved is a warning, not a failed
+# pack - and exiting non-zero would cost googlebook-slotb-sync its stamp, which it writes
+# only after the packer returns 0. That stamp is what stops the .path unit from re-packing
+# on every single boot, so an unguarded `cp` here turns a read-only /boot into a couple of
+# minutes of pointless work at every startup, with the pack itself having been fine all along.
+boot_writable() {
+  (: >/boot/.googlebook-rw-probe) 2>/dev/null || return 1
+  rm -f /boot/.googlebook-rw-probe
+  return 0
+}
 if [[ -d /boot ]]; then
-  mkdir -p /boot/slotb-backup
-  cp -f "$W/boot_b.img" "$W/init_boot_b.img" "$W/vendor_boot_b.img" /boot/slotb-backup/
-  for rscript in "$SELF_DIR/bin/googlebook-restore-slotb" "/usr/local/bin/googlebook-restore-slotb" "/usr/share/omarchy/bin/googlebook-restore-slotb"; do
-    if [[ -f "$rscript" ]]; then
-      cp -f "$rscript" /boot/slotb-backup/googlebook-restore-slotb
-      chmod 755 /boot/slotb-backup/googlebook-restore-slotb
-      break
+  BOOT_REMOUNTED=0
+  if ! boot_writable; then
+    if mount -o remount,rw /boot 2>/dev/null && boot_writable; then
+      BOOT_REMOUNTED=1
+      log "/boot was read-only; remounted rw for the backup"
     fi
-  done
-  [[ -x /usr/local/bin/googleboot-menu ]] && cp -f /usr/local/bin/googleboot-menu /boot/slotb-backup/googleboot-menu || true
-  # Keep the dracut log beside the images. It is the only record of what went into this
-  # initramfs, $W is removed by the EXIT trap, and its warnings no longer reach the console
-  # now that dracut's output is captured. ~30 KB, and the one thing worth having when Slot B
-  # does not come up.
-  [[ -s "$W/dracut.log" ]] && cp -f "$W/dracut.log" /boot/slotb-backup/dracut.log
-  if [[ -s "$W/initramfs.list" ]]; then
-    cp -f "$W/initramfs.list" /boot/slotb-backup/initramfs.list
   fi
-  log "saved Slot B backup to /boot/slotb-backup"
+  if ! boot_writable; then
+    log "WARNING: /boot is read-only and could not be remounted; no backup saved"
+    log "  Slot B itself is packed and verified - this does not affect the boot images."
+    log "  googlebook-restore-slotb needs /boot/slotb-backup after an Android OTA, so"
+    log "  re-run with: mount -o remount,rw /boot && googlebook-slotb-sync --force"
+  elif ! mkdir -p /boot/slotb-backup \
+       || ! cp -f "$W/boot_b.img" "$W/init_boot_b.img" "$W/vendor_boot_b.img" /boot/slotb-backup/; then
+    log "WARNING: could not save Slot B images to /boot/slotb-backup (pack itself is fine)"
+  else
+    for rscript in "$SELF_DIR/bin/googlebook-restore-slotb" "/usr/local/bin/googlebook-restore-slotb" "/usr/share/omarchy/bin/googlebook-restore-slotb"; do
+      if [[ -f "$rscript" ]]; then
+        cp -f "$rscript" /boot/slotb-backup/googlebook-restore-slotb || true
+        chmod 755 /boot/slotb-backup/googlebook-restore-slotb || true
+        break
+      fi
+    done
+    [[ -x /usr/local/bin/googleboot-menu ]] && cp -f /usr/local/bin/googleboot-menu /boot/slotb-backup/googleboot-menu || true
+    # Keep the dracut log beside the images. It is the only record of what went into this
+    # initramfs, $W is removed by the EXIT trap, and its warnings no longer reach the console
+    # now that dracut's output is captured. ~30 KB, and the one thing worth having when Slot B
+    # does not come up.
+    [[ -s "$W/dracut.log" ]] && { cp -f "$W/dracut.log" /boot/slotb-backup/dracut.log || true; }
+    if [[ -s "$W/initramfs.list" ]]; then
+      cp -f "$W/initramfs.list" /boot/slotb-backup/initramfs.list || true
+    fi
+    log "saved Slot B backup to /boot/slotb-backup"
+  fi
+  if (( BOOT_REMOUNTED )); then
+    mount -o remount,ro /boot 2>/dev/null || log "WARNING: could not restore /boot to read-only"
+  fi
 fi
 
 # kernel-install (Fedora/systemd) & postinst.d (Ubuntu/Debian) hooks so kernel updates refresh Slot B.

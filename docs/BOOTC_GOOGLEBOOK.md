@@ -829,6 +829,34 @@ ls "$DEPLOY"/usr/lib/modules/*/extra/
 `GOOGLEBOOK_ALLOW_NO_FB=1` overrides the refusal, but only do that if you have another way
 in — it will boot blind.
 
+**`cp: cannot remove '/boot/slotb-backup/boot_b.img': Read-only file system`, and then
+Slot B re-packs on every boot.** bootc mounts `/boot` read-only. The pack itself is fine —
+the three partitions are written and sha256-verified before this step, and the log says so:
+
+```
+[googlebook-slotb] wrote boot_b.img -> /dev/nvme0n1p14
+```
+
+What is lost is the recovery backup, and — the part that bites — the stamp.
+`googlebook-slotb-sync` writes `/var/lib/googlebook/slotb.stamp` only after the packer
+returns 0, so an unguarded failure here leaves the stamp stale and the `.path` unit
+re-packs from scratch at every boot, a couple of minutes each time, for a pack that
+succeeded.
+
+The packer now remounts `/boot` rw for the backup, restores it to read-only afterwards, and
+treats a backup it cannot save as a warning rather than a failed pack. On a machine that
+hit this before the fix, clear the stale stamp by hand:
+
+```bash
+sudo mount -o remount,rw /boot && sudo googlebook-slotb-sync --force
+```
+
+Then check `cat /var/lib/googlebook/slotb.stamp` against the live fingerprint:
+
+```bash
+{ cat /boot/loader/entries/*.conf; ls -1 /boot/ostree; } | sha256sum
+```
+
 **`googlebook-slotb-sync` never fires.** It is conditioned on `/run/ostree-booted`, so it is
 inert on a package-based system by design. On a deployment, check both units:
 

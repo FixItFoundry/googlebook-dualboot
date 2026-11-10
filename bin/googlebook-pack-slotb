@@ -4,11 +4,25 @@
 # Android Slot B (boot_b / init_boot_b / vendor_boot_b) on the disk that holds "/".
 # depthcharge (coreboot payload) boots Slot B directly; no GRUB/UEFI involved.
 #
-# Usage: googlebook-pack-slotb [kernel-version] [target-disk]
+# Usage: googlebook-pack-slotb [--prepare-only | --output-dir DIR] [kernel-version] [target-disk]
+# --output-dir builds without flashing, installing modules/config, or updating hooks/backups.
+# It reuses prepared modules; the menu installer may rebuild its binary in the toolkit.
 #   Called after OS install and from /etc/kernel/install.d on kernel updates.
 set -euo pipefail
 
 log() { echo "[googlebook-slotb] $*"; }
+die() { log "ERROR: $*" >&2; exit 1; }
+trap 'log "ERROR: Slot B operation failed at line $LINENO; check the errors above" >&2' ERR
+
+PREPARE_ONLY=0
+OUTPUT_DIR=""
+case "${1:-}" in
+  --prepare-only) PREPARE_ONLY=1; shift ;;
+  --output-dir)
+    [[ -n "${2:-}" && "$2" != -* ]] || die "--output-dir requires a directory"
+    OUTPUT_DIR="$2"; shift 2 ;;
+esac
+(( $# <= 2 )) && [[ "${1:-}" != -* ]] || die "usage: $0 [--prepare-only | --output-dir DIR] [kernel-version] [target-disk]"
 
 KVER="${1:-}"
 if [[ -z "$KVER" ]]; then
@@ -17,7 +31,7 @@ fi
 VMLINUZ="/lib/modules/$KVER/vmlinuz"
 [[ -f "$VMLINUZ" ]] || VMLINUZ="/boot/vmlinuz-$KVER"
 [[ -f "$VMLINUZ" ]] || VMLINUZ="/boot/vmlinuz-linux"
-[[ -f "$VMLINUZ" ]] || { log "no kernel image for $KVER"; exit 1; }
+(( PREPARE_ONLY )) || [[ -f "$VMLINUZ" ]] || die "no kernel image for $KVER"
 
 DISK="${2:-}"
 if [[ -z "$DISK" ]]; then
@@ -40,6 +54,7 @@ partdev() { lsblk -lnpo NAME,PARTLABEL "$DISK" | awk -v l="$1" '$2==l{print $1}'
 BOOT_B=$(partdev boot_b); INIT_B=$(partdev init_boot_b); VEND_B=$(partdev vendor_boot_b)
 if [[ -z "$BOOT_B" || -z "$INIT_B" || -z "$VEND_B" ]]; then
   log "no Android Slot B partitions on $DISK; not a Googlebook disk layout, skipping"
+  [[ -z "$OUTPUT_DIR" ]] || die "output build requires a disk with all three Slot B partitions for capacity checks"
   exit 0
 fi
 log "kernel $KVER  disk $DISK"
@@ -47,52 +62,111 @@ log "targets: $BOOT_B $INIT_B $VEND_B"
 
 SELF_DIR="$(dirname "$(dirname "$(readlink -f "$0")")")"
 [[ -d "$SELF_DIR/coreboot-mods" ]] || [[ ! -d /usr/local/share/googlebook-dualboot/coreboot-mods ]] || SELF_DIR=/usr/local/share/googlebook-dualboot
-if [[ -d "$SELF_DIR/coreboot-mods" && "$SELF_DIR" != "/usr/local/share/googlebook-dualboot" && $EUID -eq 0 ]]; then
-  mkdir -p /usr/local/share/googlebook-dualboot /usr/local/bin 2>/dev/null || true
-  cp -rf "$SELF_DIR"/{bin,coreboot-mods,audio-mods,sensor-mods,googleboot-menu} /usr/local/share/googlebook-dualboot/ 2>/dev/null || true
+if [[ -z "$OUTPUT_DIR" && -d "$SELF_DIR/coreboot-mods" && "$SELF_DIR" != "/usr/local/share/googlebook-dualboot" && $EUID -eq 0 ]]; then
+  mkdir -p /usr/local/share/googlebook-dualboot /usr/local/bin
+  cp -rf "$SELF_DIR"/{bin,coreboot-mods,audio-mods,sensor-mods,googleboot-menu} /usr/local/share/googlebook-dualboot/
   for tool in googlebook-pack-slotb googlebook-restore-slotb googlebook-switch-slot mkbootimg; do
-    [[ -f "/usr/local/share/googlebook-dualboot/bin/$tool" ]] && ln -sf "/usr/local/share/googlebook-dualboot/bin/$tool" "/usr/local/bin/$tool" 2>/dev/null || true
+    if [[ -f "/usr/local/share/googlebook-dualboot/bin/$tool" ]]; then
+      ln -sf "/usr/local/share/googlebook-dualboot/bin/$tool" "/usr/local/bin/$tool"
+    fi
   done
 fi
 export PATH="$SELF_DIR/bin:/usr/local/bin:$PATH"
-command -v mkbootimg >/dev/null || dnf install -y android-tools >/dev/null 2>&1 || apt-get install -y mkbootimg >/dev/null 2>&1 || pacman -S --noconfirm --needed android-tools >/dev/null 2>&1 || true
-# Slot B needs a systemd-based dracut initramfs; dracut-core coexists with Ubuntu's initramfs-tools.
-command -v dracut >/dev/null || apt-get install -y dracut-core zstd kexec-tools >/dev/null 2>&1 || pacman -S --noconfirm --needed dracut zstd kexec-tools >/dev/null 2>&1 || true
-command -v dracut >/dev/null || { log "dracut not found. Install dracut-core/dracut, zstd, and kexec-tools first."; exit 1; }
-command -v mkbootimg >/dev/null || { log "mkbootimg unavailable"; exit 1; }
-mkbootimg --help >/dev/null || { log "mkbootimg cannot run"; exit 1; }
 
-# --- ensure coreboot_table.ko & framebuffer-coreboot.ko are installed for $KVER ---
-mkdir -p "/lib/modules/$KVER/extra"
-if [[ -d "$SELF_DIR/coreboot-mods/prebuilt/$KVER" ]]; then
-  cp -f "$SELF_DIR/coreboot-mods/prebuilt/$KVER"/*.ko "/lib/modules/$KVER/extra/" 2>/dev/null || true
-elif [[ -d "$SELF_DIR/coreboot-mods" && -d "/lib/modules/$KVER/build" ]]; then
-  CB_BUILD=$(mktemp -d)
-  cp -rf "$SELF_DIR/coreboot-mods"/* "$CB_BUILD/"
-  make -C "/lib/modules/$KVER/build" M="$CB_BUILD" modules >/dev/null 2>&1 || true
-  strip --strip-debug "$CB_BUILD"/*.ko 2>/dev/null || true
-  cp -f "$CB_BUILD"/*.ko "/lib/modules/$KVER/extra/" 2>/dev/null || true
-  rm -rf "$CB_BUILD"
-fi
+W=$(mktemp -d)
+trap 'rm -rf "$W"' EXIT
 
-# --- ensure Moonstone SoundWire audio modules (snd-soc-sdw-utils.ko & snd-soc-sof-sdw.ko), RT1320 firmware & UCM are installed ---
+module_current() {
+  # shortcut: reuse by kernel version; remove the cached .ko files when patching their sources for the same kernel.
+  local vermagic
+  vermagic=$(modinfo -F vermagic "$1" 2>/dev/null) || return 1
+  [[ "${vermagic%% *}" == "$KVER" ]]
+}
+require_headers() {
+  [[ -d "/lib/modules/$KVER/build" ]] || die "missing build headers for $KVER; install kernel-devel-$KVER (Fedora) or linux-headers-$KVER (Debian/Ubuntu), then rerun $0 $KVER"
+}
+strip_unsigned_debug() {
+  local module signer
+  for module in "$@"; do
+    signer=$(modinfo -F signer "$module")
+    # Stripping signed modules invalidates their signatures; only trim unsigned local builds.
+    [[ -n "$signer" ]] || strip --strip-debug "$module"
+  done
+}
+
+# Resolve sources in both preparation and output-only mode.
 AUDIO_MODS_DIR="$SELF_DIR/audio-mods"
 [[ -d "$AUDIO_MODS_DIR/sdw_utils" ]] || AUDIO_MODS_DIR="/usr/local/src/moonstone-audio-fix"
 [[ -d "$AUDIO_MODS_DIR/sdw_utils" ]] || AUDIO_MODS_DIR="/usr/share/omarchy/install/hardware/audio-mods"
+SENSOR_MODS_DIR="$SELF_DIR/sensor-mods"
+[[ -d "$SENSOR_MODS_DIR" ]] || SENSOR_MODS_DIR="/usr/local/share/googlebook-sensors"
+[[ -d "$SENSOR_MODS_DIR" ]] || SENSOR_MODS_DIR="/usr/share/omarchy/install/hardware/sensor-mods"
+
+if [[ -z "$OUTPUT_DIR" ]]; then
+
+# Rewrite hooks even when the subsequent build fails, so existing installs are upgraded.
+mkdir -p /etc/kernel/install.d /etc/kernel/postinst.d
+cat > /etc/kernel/install.d/40-googlebook-slotb.install <<'EOF'
+#!/bin/sh
+[ "$1" = "add" ] || exit 0
+/usr/local/bin/googlebook-pack-slotb --prepare-only "$2" || {
+  echo "Googlebook: module preparation failed for $2; Slot B was not updated. Fix errors and rerun googlebook-pack-slotb $2." >&2
+  exit 1
+}
+EOF
+cat > /etc/kernel/install.d/95-googlebook-slotb.install <<'EOF'
+#!/bin/sh
+[ "$1" = "add" ] || exit 0
+/usr/local/bin/googlebook-pack-slotb "$2" || {
+  echo "Googlebook: Slot B packing failed for $2; do not assume the new kernel is bootable. Check errors and rerun googlebook-pack-slotb $2." >&2
+  exit 1
+}
+EOF
+cat > /etc/kernel/postinst.d/zz-googlebook-slotb <<'EOF'
+#!/bin/sh
+[ -n "$KERNEL_INSTALL_MACHINE_ID" ] && exit 0
+[ -n "$1" ] || exit 0
+/usr/local/bin/googlebook-pack-slotb "$1" || {
+  echo "Googlebook: Slot B packing failed for $1; check errors and rerun googlebook-pack-slotb $1." >&2
+  exit 1
+}
+EOF
+chmod +x /etc/kernel/install.d/{40,95}-googlebook-slotb.install /etc/kernel/postinst.d/zz-googlebook-slotb
+
+# --- ensure coreboot_table.ko & framebuffer-coreboot.ko are installed for $KVER ---
+mkdir -p "/lib/modules/$KVER/extra"
+if module_current "/lib/modules/$KVER/extra/coreboot_table.ko" && module_current "/lib/modules/$KVER/extra/framebuffer-coreboot.ko"; then
+  : # The early hook already prepared this kernel.
+elif [[ -d "$SELF_DIR/coreboot-mods/prebuilt/$KVER" ]]; then
+  cp -f "$SELF_DIR/coreboot-mods/prebuilt/$KVER"/*.ko "/lib/modules/$KVER/extra/"
+else
+  require_headers
+  CB_BUILD="$W/coreboot"
+  mkdir -p "$CB_BUILD"
+  cp -rf "$SELF_DIR/coreboot-mods"/* "$CB_BUILD/"
+  make -C "/lib/modules/$KVER/build" M="$CB_BUILD" modules
+  strip_unsigned_debug "$CB_BUILD"/{coreboot_table,framebuffer-coreboot}.ko
+  cp -f "$CB_BUILD"/{coreboot_table,framebuffer-coreboot}.ko "/lib/modules/$KVER/extra/"
+fi
+
+# --- ensure Moonstone SoundWire audio modules (snd-soc-sdw-utils.ko & snd-soc-sof-sdw.ko), RT1320 firmware & UCM are installed ---
 mkdir -p "/lib/modules/$KVER/updates"
-if [[ -d "$AUDIO_MODS_DIR/prebuilt/$KVER" ]]; then
-  cp -f "$AUDIO_MODS_DIR/prebuilt/$KVER"/*.ko "/lib/modules/$KVER/updates/" 2>/dev/null || true
-elif [[ -d "$AUDIO_MODS_DIR/sdw_utils" && -d "/lib/modules/$KVER/build" ]]; then
-  AUD_BUILD=$(mktemp -d)
+if module_current "/lib/modules/$KVER/updates/snd-soc-sdw-utils.ko" && module_current "/lib/modules/$KVER/updates/snd-soc-sof-sdw.ko"; then
+  :
+elif [[ -d "$AUDIO_MODS_DIR/prebuilt/$KVER" ]]; then
+  cp -f "$AUDIO_MODS_DIR/prebuilt/$KVER"/*.ko "/lib/modules/$KVER/updates/"
+else
+  require_headers
+  AUD_BUILD="$W/audio"
+  mkdir -p "$AUD_BUILD"
   cp -rf "$AUDIO_MODS_DIR"/{Makefile,sdw_utils,intel,codecs} "$AUD_BUILD/"
-  make -C "/lib/modules/$KVER/build" M="$AUD_BUILD" modules >/dev/null 2>&1 || true
-  strip --strip-debug "$AUD_BUILD/sdw_utils/snd-soc-sdw-utils.ko" "$AUD_BUILD/intel/boards/snd-soc-sof-sdw.ko" 2>/dev/null || true
-  cp -f "$AUD_BUILD/sdw_utils/snd-soc-sdw-utils.ko" "$AUD_BUILD/intel/boards/snd-soc-sof-sdw.ko" "/lib/modules/$KVER/updates/" 2>/dev/null || true
-  rm -rf "$AUD_BUILD"
+  make -C "/lib/modules/$KVER/build" M="$AUD_BUILD" modules
+  strip_unsigned_debug "$AUD_BUILD/sdw_utils/snd-soc-sdw-utils.ko" "$AUD_BUILD/intel/boards/snd-soc-sof-sdw.ko"
+  cp -f "$AUD_BUILD/sdw_utils/snd-soc-sdw-utils.ko" "$AUD_BUILD/intel/boards/snd-soc-sof-sdw.ko" "/lib/modules/$KVER/updates/"
 fi
 if [[ -d "$AUDIO_MODS_DIR/firmware/realtek/rt1320" ]]; then
   mkdir -p /lib/firmware/realtek/rt1320
-  cp -f "$AUDIO_MODS_DIR/firmware/realtek/rt1320"/*.dat /lib/firmware/realtek/rt1320/ 2>/dev/null || true
+  cp -f "$AUDIO_MODS_DIR/firmware/realtek/rt1320"/*.dat /lib/firmware/realtek/rt1320/
 fi
 if [[ -d /usr/share/alsa/ucm2 ]]; then
   mkdir -p /usr/share/alsa/ucm2/codecs/rt721+rt1320
@@ -120,22 +194,19 @@ UCMEOF
   fi
 fi
 # Fedora omits the Chrome EC ISHTP bridge; keep the upstream driver buildable.
-SENSOR_MODS_DIR="$SELF_DIR/sensor-mods"
-[[ -d "$SENSOR_MODS_DIR" ]] || SENSOR_MODS_DIR="/usr/local/share/googlebook-sensors"
-[[ -d "$SENSOR_MODS_DIR" ]] || SENSOR_MODS_DIR="/usr/share/omarchy/install/hardware/sensor-mods"
 if [[ -d "$SENSOR_MODS_DIR" ]]; then
-  if [[ -f "$SENSOR_MODS_DIR/prebuilt/$KVER/cros_ec_ishtp.ko" ]]; then
+  if module_current "/lib/modules/$KVER/extra/cros_ec_ishtp.ko"; then
+    :
+  elif [[ -f "$SENSOR_MODS_DIR/prebuilt/$KVER/cros_ec_ishtp.ko" ]]; then
     install -D -m644 "$SENSOR_MODS_DIR/prebuilt/$KVER/cros_ec_ishtp.ko" "/lib/modules/$KVER/extra/cros_ec_ishtp.ko"
-  elif ! modinfo -k "$KVER" cros_ec_ishtp >/dev/null 2>&1 && [[ -d "/lib/modules/$KVER/build" ]]; then
-    SENSOR_BUILD=$(mktemp -d)
+  else
+    require_headers
+    SENSOR_BUILD="$W/sensor"
+    mkdir -p "$SENSOR_BUILD"
     cp "$SENSOR_MODS_DIR"/{Makefile,cros_ec.h,cros_ec_ishtp.c} "$SENSOR_BUILD/"
-    if make -C "/lib/modules/$KVER/build" M="$SENSOR_BUILD" modules >/dev/null 2>&1; then
-      strip --strip-debug "$SENSOR_BUILD/cros_ec_ishtp.ko" 2>/dev/null || true
-      install -D -m644 "$SENSOR_BUILD/cros_ec_ishtp.ko" "/lib/modules/$KVER/extra/cros_ec_ishtp.ko"
-    else
-      log "warning: could not build cros_ec_ishtp for $KVER; continuing without tablet sensor bridge"
-    fi
-    rm -rf "$SENSOR_BUILD"
+    make -C "/lib/modules/$KVER/build" M="$SENSOR_BUILD" modules
+    strip_unsigned_debug "$SENSOR_BUILD/cros_ec_ishtp.ko"
+    install -D -m644 "$SENSOR_BUILD/cros_ec_ishtp.ko" "/lib/modules/$KVER/extra/cros_ec_ishtp.ko"
   fi
   install -D -m644 "$SENSOR_MODS_DIR/firmware/intel/ish/ish_ptl_62b0f067_501de2f8.bin" \
     /lib/firmware/intel/ish/ish_ptl_62b0f067_501de2f8.bin
@@ -145,7 +216,7 @@ add_drivers+=" intel_ish_ipc cros_ec_ishtp cros_ec_sensors cros_ec_lid_angle cro
 install_items+=" /lib/firmware/intel/ish/ish_ptl_62b0f067_501de2f8.bin "
 SENSOREOF
 fi
-depmod -a "$KVER" 2>/dev/null || true
+depmod -a "$KVER"
 
 mkdir -p /etc/modules-load.d /etc/modprobe.d /etc/dracut.conf.d
 printf "coreboot_table\nframebuffer-coreboot\n" > /etc/modules-load.d/coreboot-fb.conf
@@ -157,18 +228,27 @@ options xe gsc_firmware_path="" huc_firmware_path="" wedged_mode=0 enable_psr=0
 options spi_intel_pci writeable=1
 EOF
 cat > /etc/dracut.conf.d/90-googlebook-slotb.conf <<'EOF'
-omit_drivers+=" i915 xe amdgpu radeon nouveau cxgb4 iwlwifi iwlmld btintel btintel_pcie bluetooth cfg80211 mac80211 snd snd_sof snd_sof_pci_intel_ptl soundwire_bus intel_vpu "
+omit_drivers+=" i915 xe amdgpu radeon nouveau cxgb4 iwlwifi iwlmld btintel btintel_pcie bluetooth cfg80211 mac80211 snd.* soundwire.* intel_vpu "
 add_drivers+=" nvme nvme_core btrfs uas usb_storage coreboot_table framebuffer-coreboot cros_ec cros_ec_lpcs cros_ec_keyb "
 compress="zstd -19 -T0"
 EOF
 
-W=$(mktemp -d)
-trap 'rm -rf "$W"' EXIT
+fi # preparation (never performed by --output-dir)
+
+for module in coreboot_table framebuffer-coreboot snd-soc-sdw-utils snd-soc-sof-sdw cros_ec_ishtp; do
+  path=$(modinfo -k "$KVER" -n "$module") || die "missing $module for $KVER; run $0 --prepare-only $KVER first"
+  module_current "$path" || die "$module has the wrong vermagic for $KVER; rebuild it before packing"
+done
+(( PREPARE_ONLY )) && { log "modules prepared for $KVER"; exit 0; }
+
+command -v dracut >/dev/null || die "install dracut-core/dracut and zstd before packing"
+command -v mkbootimg >/dev/null || die "mkbootimg unavailable; install it before packing"
+mkbootimg --help >/dev/null || die "mkbootimg cannot run"
 
 # --- build hostonly initramfs omitting blacklisted GPU/Wi-Fi/BT/Audio firmware so it fits in Slot B ---
-dracut -f --hostonly --no-early-microcode --kver "$KVER" \
-  --omit-drivers "i915 xe amdgpu radeon nouveau cxgb4 iwlwifi iwlmld btintel btintel_pcie bluetooth cfg80211 mac80211 snd snd_sof snd_sof_pci_intel_ptl soundwire_bus intel_vpu" \
-  --add-drivers "nvme nvme_core btrfs uas usb_storage coreboot_table framebuffer-coreboot cros_ec cros_ec_lpcs cros_ec_keyb" \
+dracut -f --hostonly --hostonly-mode strict --no-early-microcode --kver "$KVER" \
+  --omit-drivers "i915 xe amdgpu radeon nouveau cxgb4 iwlwifi iwlmld btintel btintel_pcie bluetooth cfg80211 mac80211 snd.* soundwire.* intel_vpu" \
+  --add-drivers "nvme nvme_core btrfs ext4 vfat fat nls_cp437 nls_ascii isofs dm_crypt sd_mod uas usb_storage xhci_pci xhci_hcd usbhid hid_generic atkbd i8042 coreboot_table framebuffer-coreboot cros_ec cros_ec_lpcs cros_ec_keyb intel_ish_ipc cros_ec_ishtp cros_ec_sensors cros_ec_lid_angle" \
   --compress "zstd -19 -T0" "$W/initramfs.img" >/dev/null
 
 # --- kernel command line ---
@@ -222,9 +302,9 @@ for sync_script in \
              "$W/unpacked/usr/local/share/googlebook-audio/firmware" \
              "$W/unpacked/etc/systemd/system/initrd.target.wants" \
              "$W/unpacked/etc/systemd/system/initrd-switch-root.target.wants"
-    cp -f "/lib/modules/$KVER/extra"/*.ko "$W/unpacked/usr/local/lib/googlebook-mods/" 2>/dev/null || true
-    cp -f "/lib/modules/$KVER/updates"/snd-soc-*.ko "$W/unpacked/usr/local/lib/googlebook-audio-mods/" 2>/dev/null || true
-    cp -f /lib/firmware/realtek/rt1320/rt1320_*Google_Moonstone*.dat "$W/unpacked/usr/local/share/googlebook-audio/firmware/" 2>/dev/null || true
+    cp -f "/lib/modules/$KVER/extra"/{coreboot_table,framebuffer-coreboot,cros_ec_ishtp}.ko "$W/unpacked/usr/local/lib/googlebook-mods/"
+    cp -f "/lib/modules/$KVER/updates"/{snd-soc-sdw-utils,snd-soc-sof-sdw}.ko "$W/unpacked/usr/local/lib/googlebook-audio-mods/"
+    cp -f /lib/firmware/realtek/rt1320/rt1320_*Google_Moonstone*.dat "$W/unpacked/usr/local/share/googlebook-audio/firmware/"
     cp -f "$sync_script" "$W/unpacked/usr/bin/googlebook-sysroot-sync"
     cp -f "$sync_script" "$W/unpacked/usr/local/bin/googlebook-sysroot-sync"
     chmod 755 "$W/unpacked/usr/bin/googlebook-sysroot-sync" "$W/unpacked/usr/local/bin/googlebook-sysroot-sync"
@@ -282,6 +362,19 @@ for pair in "boot_b.img:$BOOT_B" "init_boot_b.img:$INIT_B" "vendor_boot_b.img:$V
   img="$W/${pair%%:*}"; dev="${pair#*:}"
   psz=$(blockdev --getsize64 "$dev"); isz=$(stat -c %s "$img")
   (( isz <= psz )) || { log "$img ($isz) larger than $dev ($psz)"; exit 1; }
+done
+
+if [[ -n "$OUTPUT_DIR" ]]; then
+  mkdir -p "$OUTPUT_DIR"
+  cp "$W/boot_b.img" "$W/init_boot_b.img" "$W/vendor_boot_b.img" "$OUTPUT_DIR/"
+  log "images saved to $OUTPUT_DIR; no partitions, modules/config, hooks or backups updated"
+  exit 0
+fi
+
+# All three final images passed capacity checks before the first partition write.
+for pair in "boot_b.img:$BOOT_B" "init_boot_b.img:$INIT_B" "vendor_boot_b.img:$VEND_B"; do
+  img="$W/${pair%%:*}"; dev="${pair#*:}"
+  isz=$(stat -c %s "$img")
   dd if="$img" of="$dev" bs=1M conv=fsync status=none
   h1=$(sha256sum "$img" | awk '{print $1}')
   h2=$(head -c "$isz" "$dev" | sha256sum | awk '{print $1}')
@@ -305,29 +398,6 @@ if [[ -d /boot ]]; then
   log "saved Slot B backup to /boot/slotb-backup"
 fi
 
-# kernel-install (Fedora/systemd) & postinst.d (Ubuntu/Debian) hooks so kernel updates refresh Slot B
-HOOK=/etc/kernel/install.d/95-googlebook-slotb.install
-if [[ ! -f "$HOOK" ]]; then
-  mkdir -p /etc/kernel/install.d
-  cat > "$HOOK" <<'EOF'
-#!/bin/sh
-# Refresh Googlebook Slot B (depthcharge) on kernel install
-[ "$1" = "add" ] || exit 0
-/usr/local/bin/googlebook-pack-slotb "$2" || true
-EOF
-  chmod +x "$HOOK"
-fi
-# Rewritten every run so existing installs pick up hook fixes.
-POSTINST=/etc/kernel/postinst.d/zz-googlebook-slotb
-mkdir -p /etc/kernel/postinst.d
-cat > "$POSTINST" <<'EOF'
-#!/bin/sh
-# Refresh Googlebook Slot B (depthcharge) on Debian/Ubuntu kernel install
-# kernel-install already ran 95-googlebook-slotb.install (Fedora's 95-kernel-hooks, systemd-boot); don't pack twice.
-[ -n "$KERNEL_INSTALL_MACHINE_ID" ] && exit 0
-[ -n "$1" ] && /usr/local/bin/googlebook-pack-slotb "$1" || true
-EOF
-chmod +x "$POSTINST"
 if command -v pacman >/dev/null 2>&1 || [[ -d /etc/pacman.d ]]; then
   PACMAN_HOOK=/etc/pacman.d/hooks/95-googlebook-slotb.hook
   if [[ ! -f "$PACMAN_HOOK" ]]; then

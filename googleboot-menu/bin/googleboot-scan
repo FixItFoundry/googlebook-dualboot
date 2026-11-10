@@ -183,7 +183,7 @@ heal_slot_a_if_both_linux() {
     if [[ -f "$BOOT_MNT/slotb-backup/android-stock/vbmeta_a.img" ]]; then
       cat "$BOOT_MNT/slotb-backup/android-stock/vbmeta_a.img" > /dev/nvme0n1p15 2>/dev/null || true
     fi
-    sync
+    sync 2>/dev/null || true
     if [[ -x /usr/local/bin/googleboot-menu ]]; then
       /usr/local/bin/googleboot-menu --switch-slot b --disk "$DISK" >/dev/null 2>&1 || true
     fi
@@ -393,6 +393,36 @@ run_sysroot_sync_now() {
   fi
 }
 
+# Arguments this toolkit is responsible for on this hardware, regardless of where the rest of
+# the command line comes from - the same set googlebook-pack-slotb bakes into vendor_boot_b
+# (GB_ARGS), minus "bootconfig", which belongs only to a boot image that carries one.
+#
+# A BLS entry's own options have none of them: ostree writes root=, ostree=, rootflags= and
+# "quiet rhgb" and nothing else. Handing that to kexec verbatim boots a kernel on Moonstone
+# with no rd.driver.pre for the Coreboot framebuffer modules, so simpledrm never binds and
+# there is no display; no console=tty0, so there is no text either; and no
+# clk_ignore_unused. The machine stops with the menu's last line still on screen and the
+# only way out is holding the power button. Every kexec from a BLS entry therefore gets
+# these merged in - the stale-ostree fallback and the Advanced options cards alike.
+GB_HW_ARGS_RD="rd.driver.pre=coreboot_table,framebuffer-coreboot"
+
+# Pure bash: no sed/awk in the Slot B initramfs. Adds only what is missing, so an entry that
+# already sets one of these keeps its own value.
+merge_hw_args() {
+  local cl=" $1 "
+  # Drop the splash. This path is already a fallback; a silent failure here leaves no
+  # display, no console and no log, which is the one failure mode nothing can diagnose.
+  cl="${cl// quiet / }"
+  cl="${cl// rhgb / }"
+  case "$cl" in *" rw "*|*" ro "*) ;; *) cl="$cl rw " ;; esac
+  case "$cl" in *" console=tty0 "*) ;; *) cl="$cl console=tty0 " ;; esac
+  case "$cl" in *" rd.driver.pre="*) ;; *) cl="$cl $GB_HW_ARGS_RD " ;; esac
+  case "$cl" in *" clk_ignore_unused "*) ;; *) cl="$cl clk_ignore_unused " ;; esac
+  while [[ "$cl" == *"  "* ]]; do cl="${cl//  / }"; done
+  cl="${cl# }"; cl="${cl% }"
+  printf '%s' "$cl"
+}
+
 # Extract the ostree= argument from a command line string. Pure bash on purpose: this runs in
 # the Slot B initramfs, where sed and awk are only present if some dracut module happened to
 # pull them in.
@@ -417,7 +447,7 @@ boot_entry() {
       elif [[ -x /usr/local/bin/googlebook-switch-slot ]]; then
         /usr/local/bin/googlebook-switch-slot android-once --reboot
       fi
-      sync
+      sync 2>/dev/null || true
       reboot -f 2>/dev/null || echo b > /proc/sysrq-trigger
       exit 1
       ;;
@@ -480,20 +510,28 @@ boot_entry() {
             exit 0
           fi
 
+          local kcmdline
+          kcmdline=$(merge_hw_args "$fcmdline")
           echo "[googleboot-scan] kexec loading $fkernel (initrd=$finitrd)..."
+          [[ "$kcmdline" != "$fcmdline" ]] && echo "[googleboot-scan]   cmdline: $kcmdline"
           if [[ -n "$finitrd" && -f "$finitrd" ]]; then
-            kexec -l "$fkernel" --initrd="$finitrd" --command-line="$fcmdline"
+            kexec -l "$fkernel" --initrd="$finitrd" --command-line="$kcmdline"
           else
-            kexec -l "$fkernel" --command-line="$fcmdline"
+            kexec -l "$fkernel" --command-line="$kcmdline"
           fi
           if [[ "$target_id" != usb:* ]]; then
             umount "$BOOT_MNT" 2>/dev/null || true
             udevadm settle --timeout=5 2>/dev/null || true
             run_sysroot_sync_now
-            sync
+            sync 2>/dev/null || true
             umount /sysroot 2>/dev/null || true
           fi
+          # Which of these two took is worth knowing from the screen: if the machine stops
+          # after this line, control was handed over and the new kernel is the one that is
+          # silent; if it stops before, the handoff itself is where it hung.
+          echo "[googleboot-scan] handing off to the new kernel..."
           systemctl kexec 2>/dev/null || kexec -e
+          echo "[googleboot-scan] kexec did not take control; still in the Slot B initramfs" >&2
           exit 0
         fi
       done < "$STATE_FILE"

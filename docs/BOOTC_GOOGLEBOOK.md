@@ -556,6 +556,32 @@ the `ostree=` it booted with against the one in the selected boot entry, and fal
 survives an un-repacked upgrade with one extra kexec and a message saying so. Repack to make
 it direct again.
 
+**Expect this on the first boot after every upgrade.** `bootc upgrade` only *stages* a
+deployment; `ostree-finalize-staged.service` writes the bootloader config at **shutdown**,
+and that write is what flips `boot.0` ↔ `boot.1`. Any repack necessarily ran before the
+flip, so the first boot afterwards always takes the kexec fallback, and the repack that
+makes the next one direct happens on that boot. A packed path differing from the entry only
+in `boot.<n>` — same bootcsum, same index — is this, not a wrong deployment.
+
+**The fallback used to hang here, with the menu's last line frozen on screen.** It kexec'd
+with the BLS entry's command line verbatim, and an ostree entry carries `root=`, `ostree=`,
+`rootflags=` and `quiet rhgb` — none of the arguments this hardware needs. The kernel came
+up with no `rd.driver.pre` for the Coreboot framebuffer modules, so `simpledrm` never bound
+and there was no display; no `console=tty0`, so no text either; and no `clk_ignore_unused`.
+Nothing is logged because nothing reaches a console, and the only way out is the power
+button. `googleboot-scan` now merges `rw console=tty0`, the `rd.driver.pre` pair and
+`clk_ignore_unused` into every command line it kexecs from a BLS entry, adding only what is
+absent so an entry keeping its own `ro`, `console=` or `rd.driver.pre=` is respected, and
+drops `quiet rhgb` so a failure on this path is visible. The same merge covers the
+**Advanced options** cards, which kexec older entries by the same route.
+
+A related trap on the same path: `googleboot-scan` calls `sync` before handing over, and
+`sync` is coreutils and is not in the Slot B initramfs unless asked for — it showed up as
+`line 452: sync: command not found`. The script runs under `set -uo pipefail` with no `-e`,
+so this never aborted anything, but it did skip the flush after `googlebook-sysroot-sync`
+had just written into `/sysroot`. `install_optional_items+=" /usr/bin/sync "` in
+`90-googlebook-slotb.conf` puts it in the image, and the calls are guarded either way.
+
 **To recover a machine already in this state**, boot installation media and repack. Pick the
 deployment deliberately — after an upgrade there are two, and `ls … | head -1` is as likely
 to pick the rollback as the one that boots:
